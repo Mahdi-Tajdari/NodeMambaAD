@@ -94,3 +94,51 @@ def adj_to_dgl_graph(adj):
     nx_graph = nx.from_scipy_sparse_array(adj)
     dgl_graph = dgl.DGLGraph(nx_graph)
     return dgl_graph
+# فقط این ۳ تا تابع رو به انتهای utils.py اضافه کن
+
+# فقط این ۳ تا تابع رو در utils.py کپی کن (جایگزین قبلی‌ها کن)
+
+# utils.py — این تابع رو دقیقاً جایگزین کن (فقط همین یکی!)
+def get_topk_neighbors_dgl(g, k=8):
+    """سازگار با DGL قدیمی + بدون .device + بدون .number_of_nodes() مشکل"""
+    num_nodes = g.number_of_nodes()  # درست برای DGL قدیمی
+    adj = g.adjacency_matrix(transpose=False).coalesce()
+    src, dst = adj.indices()[0], adj.indices()[1]  # src: منبع، dst: مقصد
+
+    neighbors = []
+    for i in range(num_nodes):
+        neigh = dst[src == i]  # همسایه‌های نود i
+        
+        if len(neigh) == 0:
+            neigh = torch.tensor([i], dtype=torch.long)
+        elif len(neigh) > k:
+            # بدون استفاده از g.device — خود تنسور می‌دونه کجاست
+            perm = torch.randperm(len(neigh))[:k]
+            neigh = neigh[perm]
+        else:
+            # پد با خود نود
+            pad = torch.full((k - len(neigh),), i, dtype=torch.long, device=neigh.device if len(neigh) > 0 else torch.device('cpu'))
+            neigh = torch.cat([neigh, pad], dim=0)
+        
+        neighbors.append(neigh)
+    
+    return torch.stack(neighbors)  # [N, k]
+
+def structural_encoding_from_adj(adj_dense):
+    """از adj [1,N,N] → [1,N,2]"""
+    A = adj_dense[0]  # [N,N]
+    deg = A.sum(dim=1)
+    deg_norm = deg / (deg.max() + 1e-8)
+    deg_feat = torch.stack([deg_norm, deg_norm], dim=1)  # [N,2]
+    return deg_feat.unsqueeze(0)  # [1,N,2]
+
+def compute_rq_from_adj(features, adj_dense):
+    """Rayleigh Quotient ساده و سریع"""
+    x = features[0]  # [N,F]
+    A = adj_dense[0]  # [N,N]
+    D = torch.diag(A.sum(dim=1))
+    L = D - A
+    xLx = torch.sum(x * torch.matmul(L, x), dim=1)
+    xx = torch.sum(x ** 2, dim=1) + 1e-8
+    rq = xLx / xx
+    return rq.unsqueeze(0).unsqueeze(-1)  # [1,N,1]

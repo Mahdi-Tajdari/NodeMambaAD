@@ -59,3 +59,59 @@ print(f"Final Feature Tensor Shape (features): {features.shape}")
 print(f"Final Adjacency Tensor Shape (adj): {adj.shape}")
 print(f"Number of nodes (nb_nodes): {nb_nodes}")
 # print("You can now initialize your DGL-compatible Model and run the training loop.")
+# بعد از این خط:
+print(f"Number of nodes (nb_nodes): {nb_nodes}")
+# فقط این بخش رو بعد از print(nb_nodes) اضافه کن
+from models import NodeGLADMamba
+from utils import get_topk_neighbors_dgl, structural_encoding_from_adj, compute_rq_from_adj
+# دقیقاً از اینجا شروع کن جایگزین کن
+from models import NodeGLADMamba
+# from utils import get_topk_neighbors_dgl, structural_encoding_from_adj, compute_rq_from_adj
+from sklearn.metrics import roc_auc_score
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+features = features.to(device)
+adj = adj.to(device)
+dgl_graph = dgl_graph.to(device)
+
+print("Preparing NodeGLADMamba inputs...")
+x_s = structural_encoding_from_adj(adj)                    # [1,N,2]
+neighbors = get_topk_neighbors_dgl(dgl_graph, k=8).to(device)  # [N,8]
+rq = compute_rq_from_adj(features, adj)                    # [1,N,1]
+
+# تبدیل ano_label به تنسور
+ano_label = torch.FloatTensor(ano_label).to(device)
+
+model = NodeGLADMamba(feat_dim=ft_size).to(device)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
+
+print("Training NodeGLADMamba (Unsupervised Anomaly Detection)...")
+print("-" * 60)
+
+# فقط این بخش از main.py رو جایگزین کن
+optimizer = torch.optim.Adam(model.parameters(), lr=3e-4, weight_decay=1e-5)
+
+print("Training شروع شد — دقیقاً همون مدلی که گفتم!")
+best_auc = 0.0
+for epoch in range(1, 351):
+    model.train()
+    optimizer.zero_grad()
+    
+    score = model(features, x_s, adj, neighbors, rq)  # [N]
+    loss = -score.mean()  # maximize کن — همون که گفتم!
+
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    optimizer.step()
+
+    if epoch % 25 == 0:
+        model.eval()
+        with torch.no_grad():
+            score_eval = model(features, x_s, adj, neighbors, rq)
+            auc = roc_auc_score(ano_label.cpu().numpy(), score_eval.cpu().numpy())
+            if auc > best_auc:
+                best_auc = auc
+            print(f"Epoch {epoch:03d} | Loss: {loss.item():.4f} | AUC: {auc:.4f} | Best: {best_auc:.4f}")
+        model.train()
+
+print(f"\nتموم شد! AUC نهایی: {best_auc:.4f}")
