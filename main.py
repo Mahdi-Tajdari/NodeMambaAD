@@ -11,7 +11,7 @@ from sklearn.metrics import roc_auc_score
 
 # DGL + PyG + Mamba
 import dgl
-from torch_geometric.utils import to_undirected
+from torch_geometric.utils import to_undirected, dropout_edge  # تغییر به dropout_edge
 
 # توابع خودمون
 from utils import load_mat, preprocess_features, adj_to_dgl_graph, get_topk_neighbors_dgl
@@ -71,24 +71,39 @@ rq = compute_rq_from_adj(x_raw, edge_index).to(device)  # to(device)
 ano_label_tensor = torch.FloatTensor(ano_label).to(device)
 
 # ------------------- 4. Model & Optimizer -------------------
-model = NodeGLADMamba(feat_dim=ft_size, hidden_dim=96, k=8).to(device)
-optimizer = torch.optim.AdamW(model.parameters(), lr=0.0005, weight_decay=1e-4)  # LR متعادل
+model = NodeGLADMamba(feat_dim=ft_size, hidden_dim=128, k=8).to(device)
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.0005, weight_decay=1e-4)
 print("Training شروع شد — مدل نهایی با GCN + Mamba رسمی + RQ درست")
 print("-" * 70)
 
 best_auc = 0.0
-patience = 50  # early stopping اگر AUC تغییر نکرد
+patience = 100
 counter = 0
+tau = 0.07  # temperature برای InfoNCE
+train_losses = []  # برای z-score
 
 for epoch in range(1, 401):
     model.train()
     optimizer.zero_grad()
 
-    diff, score = model(x_raw, x_struct, edge_index, neighbors, rq)  # حالا forward diff و score برمی‌گردونه
+    # Augmentation: edge drop
+    edge_index_aug = dropout_edge(edge_index, p=0.1)[0]
 
-    # Loss selective: minimize diff.mean() (reconstruction برای normalها)
+    out1, out2 = model(x_raw, x_struct, edge_index_aug, neighbors, rq)  # حالا forward out1, out2 برمی‌گردونه
+
+    # InfoNCE loss (contrastive)
+    out1_norm = F.normalize(out1, dim=-1)
+    out2_norm = F.normalize(out2, dim=-1)
+    sim_matrix = torch.mm(out1_norm, out2_norm.t()) / tau  # [N, N]
+    mask = torch.eye(nb_nodes, device=device).bool()
+    positives = sim_matrix[mask].view(nb_nodes, 1)
+    negatives = sim_matrix[~mask].view(nb_nodes, -1)
+    logits = torch.cat([positives, negatives], dim=1)
+    labels = torch.zeros(nb_nodes, dtype=torch.long, device=device)
+    loss = F.cross_entropy(logits, labels)
+
     reg_loss = 0.0001 * sum(p.norm(2)**2 for p in model.parameters() if p.requires_grad)
-    loss = diff.mean() + reg_loss
+    loss += reg_loss
 
     if torch.isnan(loss).any() or torch.isinf(loss).any():
         print(f"NaN/Inf detected at epoch {epoch}! Stopping.")
@@ -98,10 +113,26 @@ for epoch in range(1, 401):
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
     optimizer.step()
 
+    train_losses.append(loss.item())  # برای z-score
+
     if epoch % 25 == 0 or epoch <= 10:
         model.eval()
         with torch.no_grad():
-            _, score_eval = model(x_raw, x_struct, edge_index, neighbors, rq)
+            out1_eval, out2_eval = model(x_raw, x_struct, edge_index, neighbors, rq)
+            out1_norm = F.normalize(out1_eval, dim=-1)
+            out2_norm = F.normalize(out2_eval, dim=-1)
+            cos_sim = F.cosine_similarity(out1_norm, out2_norm)
+            diff_eval = 1 - cos_sim
+            # Z-score برای diff
+            if len(train_losses) > 0:
+                mu = np.mean(train_losses)
+                sigma = np.std(train_losses) + 1e-8
+                z_diff = (diff_eval - mu) / sigma
+            else:
+                z_diff = diff_eval
+            rq_score = rq.squeeze() / (rq.mean() + 1e-8)
+            rq_score = torch.clamp(rq_score, 0, 10)
+            score_eval = z_diff + model.rq_weight * rq_score
             auc = roc_auc_score(ano_label, score_eval.cpu().numpy())
             if auc > best_auc:
                 best_auc = auc
