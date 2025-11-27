@@ -125,35 +125,39 @@ def get_topk_neighbors_dgl(g, k=8):
     return torch.stack(neighbors)  # [N, k]
 
 # utils.py — نسخه ۱۰۰٪ درست و بدون خطا (کپی کن جایگزین کن)
+# utils.py (بقیه توابع نگه دار)
+
+# utils.py (بقیه بدون تغییر)
+
 def structural_encoding_from_adj(edge_index, num_nodes):
     device = edge_index.device
     row, col = edge_index
     
-    # ساخت ماتریس adjacency درست (undirected)
+    # adj dense
     adj = torch.zeros((num_nodes, num_nodes), device=device, dtype=torch.float)
     ones = torch.ones(row.size(0), device=device)
     adj.index_put_((row, col), ones, accumulate=True)
-    adj.index_put_((col, row), ones, accumulate=True)  # undirected
+    adj.index_put_((col, row), ones, accumulate=True)
     
-    deg = adj.sum(1)  # [N]
+    deg = adj.sum(1)
     deg_log = torch.log1p(deg)
 
-    # Clustering coefficient
+    # Clustering coeff
     adj2 = adj @ adj
     deg_pair = deg * (deg - 1)
-    deg_pair[deg_pair == 0] = 1  # جلوگیری از تقسیم بر صفر
+    deg_pair[deg_pair == 0] = 1
     clust = adj2.diag() / deg_pair
     clust = clust.clamp(0, 1)
 
-    # 5-step random walk
+    # 5-step RW
     rw = torch.eye(num_nodes, device=device)
     rws = []
     for _ in range(5):
         rw = rw @ adj
         rws.append(rw.diag())
-    rw_feat = torch.stack(rws, dim=1)  # [N, 5]
+    rw_feat = torch.stack(rws, dim=1)  # [N,5]
 
-    # 5 landmark distances (BFS)
+    # 5 landmark dist
     landmarks = random.sample(range(num_nodes), min(5, num_nodes))
     dist_enc = torch.zeros(num_nodes, len(landmarks), device=device)
     for i, lm in enumerate(landmarks):
@@ -166,7 +170,6 @@ def structural_encoding_from_adj(edge_index, num_nodes):
         while ptr < len(q):
             u = q[ptr]
             ptr += 1
-            # همسایه‌های u
             neighbors = col[row == u]
             for v in neighbors.tolist():
                 if not visited[v]:
@@ -175,17 +178,42 @@ def structural_encoding_from_adj(edge_index, num_nodes):
                     q.append(v)
         dist_enc[:, i] = dist.float()
 
-    # ترکیب همه
+    # Eigenvector centrality approx
+    ev = torch.ones(num_nodes, device=device) / num_nodes
+    for _ in range(10):
+        ev = adj @ ev
+        ev /= ev.norm()
+    ev = ev.unsqueeze(1)
+
+    # PageRank approx
+    pr = torch.ones(num_nodes, device=device) / num_nodes
+    alpha = 0.85
+    for _ in range(10):
+        pr = alpha * (adj @ pr) + (1 - alpha) / num_nodes
+    pr = pr.unsqueeze(1)
+
+    # Betweenness approx بهتر: استفاده از degree-based proxy ساده (high degree = high betweenness)
+    bet = deg.unsqueeze(1) / deg.mean()  # proxy ساده بدون random برای stability
+
+    # Eccentricity approx
+    ecc = dist_enc.max(1)[0].unsqueeze(1)
+
+    # ترکیب به 20 فیچر
     enc = torch.cat([
         deg_log.unsqueeze(1),
         clust.unsqueeze(1),
         rw_feat,
-        dist_enc
-    ], dim=1)  # [N, 1+1+5+5 = 12] → می‌تونی بعداً بیشتر کنی
+        dist_enc,
+        ev,
+        pr,
+        bet,
+        ecc,
+        torch.zeros(num_nodes, 4, device=device)  # padding
+    ], dim=1)[:, :20]
 
-    # نرمال‌سازی
+    # normalize
     enc = (enc - enc.mean(0, keepdim=True)) / (enc.std(0, keepdim=True) + 1e-8)
-    return enc  # [N, 12]
+    return enc
 # utils.py — نسخه نهایی compute_rq_from_adj (بدون هیچ خطا)
 def compute_rq_from_adj(x, edge_index):
     row, col = edge_index
