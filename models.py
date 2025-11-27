@@ -18,39 +18,42 @@ class NodeGLADMamba(nn.Module):
         # دو تا Mamba رسمی
         self.mamba1 = Mamba(d_model=hidden_dim, d_state=16, d_conv=4, expand=2)
         self.mamba2 = Mamba(d_model=hidden_dim, d_state=16, d_conv=4, expand=2)
-        # این دو خط رو اضافه کن:
-        # self.mamba1.use_mem_eff_path = False
-        # self.mamba2.use_mem_eff_path = False
 
         self.norm = nn.LayerNorm(hidden_dim)
-        self.rq_weight = nn.Parameter(torch.tensor(1.0))
+        self.rq_weight = nn.Parameter(torch.tensor(0.5))  # learnable با init کم
 
     def forward(self, x, x_struct, edge_index, neighbors, rq):
-        # x: [N,F], x_struct: [N,16], edge_index: [2,E], neighbors: [N,8], rq: [N,1]
+        # x: [N,F], x_struct: [N,12], edge_index: [2,E], neighbors: [N,8], rq: [N,1]
         
         h = x
         for conv in self.gnn_feat:
-            h = F.elu(conv(h, edge_index))
-        h_feat = self.norm(h)
+            h = self.norm(F.elu(conv(h, edge_index)))
+        
+        h_feat = h
         
         h = x_struct
         for conv in self.gnn_struct:
-            h = F.elu(conv(h, edge_index))
-        h_struct = self.norm(h)
+            h = self.norm(F.elu(conv(h, edge_index)))
         
-        # ساخت توالی: مرکز + ۸ همسایه
+        h_struct = h
+        
+        # ساخت توالی
         seq1 = torch.cat([h_feat.unsqueeze(1), h_struct[neighbors]], dim=1)   # [N,9,96]
         seq2 = torch.cat([h_struct.unsqueeze(1), h_feat[neighbors]], dim=1)
         
         # Mamba bidirectional
-        out1 = self.mamba1(seq1)[:, 0, :]      # فقط این
+        out1 = self.mamba1(seq1)[:, 0, :]      
         out2 = self.mamba2(seq2.flip(1))[:, 0, :]
 
-        diff = F.mse_loss(out1, out2, reduction='none').mean(dim=1)
+        # Normalize برای bound diff
+        out1_norm = F.normalize(out1, dim=-1)
+        out2_norm = F.normalize(out2, dim=-1)
+        diff = F.mse_loss(out1_norm, out2_norm, reduction='none').mean(dim=1)
 
-        # RQ خیلی ساده و پایدار
+        # RQ فقط برای score eval
         rq_score = rq.squeeze()
-        rq_score = rq_score / (rq_score.mean() + 1e-8)  # فقط تقسیم بر میانگین
+        rq_score = rq_score / (rq_score.mean() + 1e-8)
+        rq_score = torch.clamp(rq_score, 0, 10)
 
-        score = diff + 2.0 * rq_score  # ضریب 2.0 بهترین نتیجه رو داد # ضریب 3.0 طلاییه# ضریب ثابت بهتر از learnable در اوایل آموزش
-        return score
+        score = diff + self.rq_weight * rq_score
+        return diff, score  # diff برای loss، score برای eval

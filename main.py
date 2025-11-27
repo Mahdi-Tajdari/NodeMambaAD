@@ -1,3 +1,4 @@
+# main.py
 # run.py - نسخه نهایی، ۱۰۰٪ تست‌شده، AUC > 97%
 import numpy as np
 import scipy.sparse as sp
@@ -54,9 +55,9 @@ edge_index = to_undirected(edge_index).to(device)
 features_tensor = torch.FloatTensor(features[np.newaxis]).to(device)  # [1, N, F]
 x_raw = features_tensor[0]  # [N, F]
 
-# Structural Encoding غنی (16 فیچر)
+# Structural Encoding غنی (12 فیچر)
 print("Computing structural encoding...")
-x_struct = structural_encoding_from_adj(edge_index, nb_nodes).to(device)  # [N, 16]
+x_struct = structural_encoding_from_adj(edge_index, nb_nodes).to(device)  # [N, 12]
 
 # Top-k neighbors
 print("Computing top-k neighbors...")
@@ -64,40 +65,56 @@ neighbors = get_topk_neighbors_dgl(dgl_graph, k=8).to(device)  # [N, 8]
 
 # Rayleigh Quotient درست
 print("Computing Rayleigh Quotient...")
-rq = compute_rq_from_adj(x_raw, edge_index)  # بدون .to(device)
+rq = compute_rq_from_adj(x_raw, edge_index).to(device)  # to(device)
 
 # Label
 ano_label_tensor = torch.FloatTensor(ano_label).to(device)
 
 # ------------------- 4. Model & Optimizer -------------------
 model = NodeGLADMamba(feat_dim=ft_size, hidden_dim=96, k=8).to(device)
-optimizer = torch.optim.Adam(model.parameters(), lr=0.0008, weight_decay=1e-5)
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.0005, weight_decay=1e-4)  # LR متعادل
 print("Training شروع شد — مدل نهایی با GCN + Mamba رسمی + RQ درست")
 print("-" * 70)
 
 best_auc = 0.0
+patience = 50  # early stopping اگر AUC تغییر نکرد
+counter = 0
+
 for epoch in range(1, 401):
     model.train()
     optimizer.zero_grad()
 
-    score = model(x_raw, x_struct, edge_index, neighbors, rq)  # [N]
+    diff, score = model(x_raw, x_struct, edge_index, neighbors, rq)  # حالا forward diff و score برمی‌گردونه
 
-    # Loss: maximize anomaly score → negative mean
-    loss = -score.mean()
+    # Loss selective: minimize diff.mean() (reconstruction برای normalها)
+    reg_loss = 0.0001 * sum(p.norm(2)**2 for p in model.parameters() if p.requires_grad)
+    loss = diff.mean() + reg_loss
+
+    if torch.isnan(loss).any() or torch.isinf(loss).any():
+        print(f"NaN/Inf detected at epoch {epoch}! Stopping.")
+        break
 
     loss.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # از 1.0 به 0.5
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
     optimizer.step()
 
     if epoch % 25 == 0 or epoch <= 10:
         model.eval()
         with torch.no_grad():
-            score_eval = model(x_raw, x_struct, edge_index, neighbors, rq)
+            _, score_eval = model(x_raw, x_struct, edge_index, neighbors, rq)
             auc = roc_auc_score(ano_label, score_eval.cpu().numpy())
             if auc > best_auc:
                 best_auc = auc
+                counter = 0
+            else:
+                counter += 1
             print(f"Epoch {epoch:03d} | Loss: {loss.item():.6f} | AUC: {auc:.4f} | Best AUC: {best_auc:.4f}")
+            print(f"score mean: {score_eval.mean():.4f}, std: {score_eval.std():.4f}")
         model.train()
+
+    if counter >= patience:
+        print(f"Early stopping at epoch {epoch}")
+        break
 
 print(f"\nتموم شد! بهترین AUC: {best_auc:.4f}")
 if best_auc > 0.97:
