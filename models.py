@@ -1,4 +1,4 @@
-# models.py
+# models.py - نسخه با k=32 (بدون تغییر دیگر)
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6,12 +6,12 @@ from mamba_ssm import Mamba
 from torch_geometric.nn import GCNConv
 
 class NodeGLADMamba(nn.Module):
-    def __init__(self, feat_dim, hidden_dim=128, k=16):
+    def __init__(self, feat_dim, hidden_dim=128, k=32):
         super().__init__()
         self.k = k
         self.hidden_dim = hidden_dim
         
-        # سه لایه GCN
+        # سه لایه GCN (همون قبلی)
         self.gnn_feat = nn.ModuleList([
             GCNConv(feat_dim, hidden_dim),
             GCNConv(hidden_dim, hidden_dim),
@@ -28,7 +28,7 @@ class NodeGLADMamba(nn.Module):
         self.mamba2 = Mamba(d_model=hidden_dim, d_state=16, d_conv=4, expand=4)
         
         self.norm = nn.LayerNorm(hidden_dim)
-        self.dropout = nn.Dropout(0.4)  # بالاتر برای ضد-overfit
+        self.dropout = nn.Dropout(0.4)
         self.rq_weight = nn.Parameter(torch.tensor(0.5))
 
     def forward(self, x, x_struct, edge_index, neighbors, rq):
@@ -44,18 +44,18 @@ class NodeGLADMamba(nn.Module):
             h = self.dropout(h)
         h_struct = self.norm(h)
         
-        seq1 = torch.cat([h_feat.unsqueeze(1), h_struct[neighbors]], dim=1)
+        seq1 = torch.cat([h_feat.unsqueeze(1), h_struct[neighbors]], dim=1)  # [N,33,128] با k=32
         seq2 = torch.cat([h_struct.unsqueeze(1), h_feat[neighbors]], dim=1)
         
         out1 = self.mamba1(seq1)[:, 0, :]
         out2 = self.mamba2(seq2.flip(1))[:, 0, :]
 
         diff = F.mse_loss(out1, out2, reduction='none').mean(dim=1)
-        diff = torch.clamp(diff, min=0.0, max=5.0)  # سخت‌تر برای stability
+        diff = torch.clamp(diff, min=0.0, max=5.0)
 
         rq_score = rq.squeeze()
         rq_score = torch.sigmoid(rq_score / (rq_score.mean() + 1e-8))
-        rq_score = torch.clamp(rq_score, min=0.0, max=2.0)  # کمتر max
+        rq_score = torch.clamp(rq_score, min=0.0, max=2.0)
 
         score = diff + torch.sigmoid(self.rq_weight) * rq_score
-        return score
+        return score  # بدون out1/out2 (loss تغییر نکرده)

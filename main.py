@@ -1,4 +1,4 @@
-# run.py - نسخه ضد-overfit با regularization قوی‌تر
+# run.py - نسخه با k=32 برای تست مرحله‌ای
 import numpy as np
 import scipy.sparse as sp
 import torch
@@ -15,7 +15,7 @@ from torch_geometric.utils import to_undirected
 # توابع خودمون
 from utils import load_mat, preprocess_features, adj_to_dgl_graph, get_topk_neighbors_dgl
 from utils import structural_encoding_from_adj, compute_rq_from_adj
-from models import NodeGLADMamba  # مدل آپدیت‌شده
+from models import NodeGLADMamba  # مدل با k=32
 
 # Seed
 class Args:
@@ -57,9 +57,9 @@ x_raw = features_tensor[0]  # [N, F]
 print("Computing structural encoding...")
 x_struct = structural_encoding_from_adj(edge_index, nb_nodes).to(device)  # [N, 20]
 
-# Top-k neighbors (k=16)
+# Top-k neighbors (k=32 برای گسترش توالی Mamba)
 print("Computing top-k neighbors...")
-neighbors = get_topk_neighbors_dgl(dgl_graph, k=16).to(device)  # [N, 16]
+neighbors = get_topk_neighbors_dgl(dgl_graph, k=32).to(device)  # [N, 32]
 
 # Rayleigh Quotient
 print("Computing Rayleigh Quotient...")
@@ -69,17 +69,17 @@ rq = compute_rq_from_adj(x_raw, edge_index).to(device)
 ano_label_tensor = torch.FloatTensor(ano_label).to(device)
 
 # ------------------- 4. Model & Optimizer -------------------
-model = NodeGLADMamba(feat_dim=ft_size, hidden_dim=128, k=16).to(device)
-optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5, weight_decay=5e-4)  # weight_decay بالاتر برای ضد-overfit
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=20, verbose=True)  # patience کمتر برای lr adjust زود
+model = NodeGLADMamba(feat_dim=ft_size, hidden_dim=128, k=32).to(device)  # k=32 اعمال شد
+optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5, weight_decay=5e-4)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=20, verbose=True)
 
-print("Training شروع شد — ضد-overfit با regularization قوی")
+print("Training شروع شد — فقط با k=32 (بدون تغییر loss)")
 print("-" * 70)
 
-best_auc_val = 0.0  # حالا بر اساس val stop می‌کنیم
+best_auc_val = 0.0
 best_auc_test = 0.0
 best_epoch = 0
-patience = 150  # بالاتر برای فرصت بیشتر
+patience = 150
 counter = 0
 
 for epoch in range(1, 601):
@@ -88,7 +88,7 @@ for epoch in range(1, 601):
 
     score = model(x_raw, x_struct, edge_index, neighbors, rq)  # [N]
 
-    score_clamped = torch.clamp(score, min=0.0, max=50.0)  # clamp کمتر برای stability
+    score_clamped = torch.clamp(score, min=0.0, max=50.0)
     loss = -score_clamped.mean()
 
     loss.backward()
@@ -117,4 +117,4 @@ for epoch in range(1, 601):
     model.train()
 
 print(f"\nتموم شد! بهترین Val AUC: {best_auc_val:.4f} | بهترین Test AUC: {best_auc_test:.4f} در epoch {best_epoch}")
-print("اگر هنوز افت کرد، dropout رو به 0.5 ببر و ران کن!")
+print("اگر AUC بالاتر رفت، تغییر بعدی رو بگو!")
