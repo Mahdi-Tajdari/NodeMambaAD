@@ -28,8 +28,8 @@ class NodeGLADMamba(nn.Module):
         self.mamba2 = Mamba(d_model=hidden_dim, d_state=16, d_conv=4, expand=4)
         
         self.norm = nn.LayerNorm(hidden_dim)
-        self.dropout = nn.Dropout(0.3)
-        self.rq_weight = nn.Parameter(torch.tensor(0.5))  # init کوچکتر برای کمتر amplify rq
+        self.dropout = nn.Dropout(0.4)  # بالاتر برای ضد-overfit
+        self.rq_weight = nn.Parameter(torch.tensor(0.5))
 
     def forward(self, x, x_struct, edge_index, neighbors, rq):
         h = x
@@ -51,11 +51,11 @@ class NodeGLADMamba(nn.Module):
         out2 = self.mamba2(seq2.flip(1))[:, 0, :]
 
         diff = F.mse_loss(out1, out2, reduction='none').mean(dim=1)
-        diff = torch.clamp(diff, min=0.0, max=10.0)  # سخت‌تر clamp برای diff (max=10)
+        diff = torch.clamp(diff, min=0.0, max=5.0)  # سخت‌تر برای stability
 
         rq_score = rq.squeeze()
         rq_score = torch.sigmoid(rq_score / (rq_score.mean() + 1e-8))
-        rq_score = torch.clamp(rq_score, min=0.0, max=5.0)  # clamp برای rq_score (max=5)
+        rq_score = torch.clamp(rq_score, min=0.0, max=2.0)  # کمتر max
 
-        score = diff + torch.sigmoid(self.rq_weight) * rq_score  # rq_weight رو با sigmoid bound کن (0-1 range)
+        score = diff + torch.sigmoid(self.rq_weight) * rq_score
         return score

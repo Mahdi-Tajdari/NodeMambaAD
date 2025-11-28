@@ -1,4 +1,4 @@
-# run.py - نسخه super stable با لاگ هر epoch
+# run.py - نسخه ضد-overfit با regularization قوی‌تر
 import numpy as np
 import scipy.sparse as sp
 import torch
@@ -15,7 +15,7 @@ from torch_geometric.utils import to_undirected
 # توابع خودمون
 from utils import load_mat, preprocess_features, adj_to_dgl_graph, get_topk_neighbors_dgl
 from utils import structural_encoding_from_adj, compute_rq_from_adj
-from models import NodeGLADMamba  # مدل stable‌تر
+from models import NodeGLADMamba  # مدل آپدیت‌شده
 
 # Seed
 class Args:
@@ -70,15 +70,16 @@ ano_label_tensor = torch.FloatTensor(ano_label).to(device)
 
 # ------------------- 4. Model & Optimizer -------------------
 model = NodeGLADMamba(feat_dim=ft_size, hidden_dim=128, k=16).to(device)
-optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5, weight_decay=1e-4)  # lr حتی پایین‌تر برای stability
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=50, verbose=True)
+optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5, weight_decay=5e-4)  # weight_decay بالاتر برای ضد-overfit
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=20, verbose=True)  # patience کمتر برای lr adjust زود
 
-print("Training شروع شد — با لاگ هر epoch و fix explosion")
+print("Training شروع شد — ضد-overfit با regularization قوی")
 print("-" * 70)
 
-best_auc = 0.0
+best_auc_val = 0.0  # حالا بر اساس val stop می‌کنیم
+best_auc_test = 0.0
 best_epoch = 0
-patience = 100
+patience = 150  # بالاتر برای فرصت بیشتر
 counter = 0
 
 for epoch in range(1, 601):
@@ -87,12 +88,11 @@ for epoch in range(1, 601):
 
     score = model(x_raw, x_struct, edge_index, neighbors, rq)  # [N]
 
-    # Loss: -mean(score) اما با clamp روی score برای جلوگیری از negative explosion
-    score_clamped = torch.clamp(score, min=0.0, max=100.0)  # anomaly score باید مثبت و bounded باشه
+    score_clamped = torch.clamp(score, min=0.0, max=50.0)  # clamp کمتر برای stability
     loss = -score_clamped.mean()
 
     loss.backward()
-    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.05)  # clip سخت‌تر (0.05)
+    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.05)
     optimizer.step()
 
     model.eval()
@@ -100,20 +100,21 @@ for epoch in range(1, 601):
         score_eval = model(x_raw, x_struct, edge_index, neighbors, rq)
         auc_val = roc_auc_score(ano_label[idx_val], score_eval[idx_val].cpu().numpy())
         auc_test = roc_auc_score(ano_label[idx_test], score_eval[idx_test].cpu().numpy())
-        print(f"Epoch {epoch:03d} | Loss: {loss.item():.6f} | Val AUC: {auc_val:.4f} | Test AUC: {auc_test:.4f} | Best Test AUC: {best_auc:.4f} | Grad Norm: {grad_norm:.4f}")
+        print(f"Epoch {epoch:03d} | Loss: {loss.item():.6f} | Val AUC: {auc_val:.4f} | Test AUC: {auc_test:.4f} | Best Val AUC: {best_auc_val:.4f} | Grad Norm: {grad_norm:.4f}")
 
         scheduler.step(auc_val)
 
-        if auc_test > best_auc:
-            best_auc = auc_test
+        if auc_val > best_auc_val:
+            best_auc_val = auc_val
+            best_auc_test = auc_test
             best_epoch = epoch
             counter = 0
         else:
             counter += 1
             if counter >= patience:
-                print(f"Early stopping at epoch {epoch}")
+                print(f"Early stopping at epoch {epoch} — بهترین Test AUC: {best_auc_test:.4f}")
                 break
     model.train()
 
-print(f"\nتموم شد! بهترین Test AUC: {best_auc:.4f} در epoch {best_epoch}")
-print("بهترین AUC تا حالا 0.8604 بود — این نسخه باید بالاتر بره بدون explosion. اگر هنوز explode کرد، clamp max رو به 50 کم کن.")
+print(f"\nتموم شد! بهترین Val AUC: {best_auc_val:.4f} | بهترین Test AUC: {best_auc_test:.4f} در epoch {best_epoch}")
+print("اگر هنوز افت کرد، dropout رو به 0.5 ببر و ران کن!")
