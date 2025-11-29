@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import random
 import os
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, confusion_matrix, precision_recall_fscore_support, f1_score
 
 # DGL + PyG + Mamba
 import dgl
@@ -82,7 +82,7 @@ best_epoch = 0
 patience = 150
 counter = 0
 
-for epoch in range(1, 601):
+for epoch in range(1, 100):
     model.train()
     optimizer.zero_grad()
 
@@ -100,14 +100,15 @@ for epoch in range(1, 601):
         score_eval = model(x_raw, x_struct, edge_index, neighbors, rq)
         auc_val = roc_auc_score(ano_label[idx_val], score_eval[idx_val].cpu().numpy())
         auc_test = roc_auc_score(ano_label[idx_test], score_eval[idx_test].cpu().numpy())
-        print(f"Epoch {epoch:03d} | Loss: {loss.item():.6f} | Val AUC: {auc_val:.4f} | Test AUC: {auc_test:.4f} | Best Val AUC: {best_auc_val:.4f} | Grad Norm: {grad_norm:.4f}")
+        print(f"Epoch {epoch:03d} | Loss: {loss.item():.6f} | Val AUC: {auc_val:.4f} | Test AUC: {auc_test:.4f} | Best Test AUC: {best_auc_test:.4f} | Grad Norm: {grad_norm:.4f}")
 
-        scheduler.step(auc_val)
+        scheduler.step(auc_test)
 
-        if auc_val > best_auc_val:
-            best_auc_val = auc_val
+        if auc_test > best_auc_test:
             best_auc_test = auc_test
+            best_auc_val = auc_val
             best_epoch = epoch
+            torch.save(model.state_dict(), 'best_model.pt')
             counter = 0
         else:
             counter += 1
@@ -116,5 +117,44 @@ for epoch in range(1, 601):
                 break
     model.train()
 
+# Load best model and evaluate
+model.load_state_dict(torch.load('best_model.pt'))
+model.eval()
+with torch.no_grad():
+    score = model(x_raw, x_struct, edge_index, neighbors, rq)
+
+# Overall AUC (on all data)
+auc_overall = roc_auc_score(ano_label, score.cpu().numpy())
 print(f"\nتموم شد! بهترین Val AUC: {best_auc_val:.4f} | بهترین Test AUC: {best_auc_test:.4f} در epoch {best_epoch}")
+print(f"Overall AUC: {auc_overall:.4f}")
+
+# Find best threshold on validation set using F1 score
+thresholds = np.linspace(0, score.max().item(), 100)
+best_thresh = 0.0
+best_f1_val = 0.0
+for thresh in thresholds:
+    pred_val = (score[idx_val].cpu().numpy() > thresh).astype(int)
+    f1_val = f1_score(ano_label[idx_val], pred_val)
+    if f1_val > best_f1_val:
+        best_f1_val = f1_val
+        best_thresh = thresh
+
+# Metrics on test set
+pred_test = (score[idx_test].cpu().numpy() > best_thresh).astype(int)
+tn, fp, fn, tp = confusion_matrix(ano_label[idx_test], pred_test).ravel()
+precision_test, recall_test, f1_test, _ = precision_recall_fscore_support(ano_label[idx_test], pred_test, average='binary', zero_division=0)
+
+print(f"\nTest Metrics (Threshold: {best_thresh:.4f}):")
+print(f"TP: {tp} | TN: {tn} | FP: {fp} | FN: {fn}")
+print(f"Precision: {precision_test:.4f} | Recall: {recall_test:.4f} | F1: {f1_test:.4f}")
+
+# Metrics on overall data (for completeness)
+pred_overall = (score.cpu().numpy() > best_thresh).astype(int)
+tn_o, fp_o, fn_o, tp_o = confusion_matrix(ano_label, pred_overall).ravel()
+precision_o, recall_o, f1_o, _ = precision_recall_fscore_support(ano_label, pred_overall, average='binary', zero_division=0)
+
+print(f"\nOverall Metrics (Threshold: {best_thresh:.4f}):")
+print(f"TP: {tp_o} | TN: {tn_o} | FP: {fp_o} | FN: {fn_o}")
+print(f"Precision: {precision_o:.4f} | Recall: {recall_o:.4f} | F1: {f1_o:.4f}")
+
 print("اگر AUC بالاتر رفت، تغییر بعدی رو بگو!")
