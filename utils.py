@@ -6,6 +6,7 @@ import torch
 import scipy.io as sio
 import random
 import dgl
+from sklearn.model_selection import train_test_split  # اضافه شده برای random split
 
 # توابع دقیقا مشابه کد مرجع
 def sparse_to_tuple(sparse_mx, insert_batch=False):
@@ -57,7 +58,7 @@ def dense_to_one_hot(labels_dense, num_classes):
     return labels_one_hot
 
 def load_mat(dataset_name):
-    """Load .mat dataset."""
+    """Load .mat dataset with random stratified split (80/10/10)."""
     data = sio.loadmat("./{}.mat".format(dataset_name))
     
     label = data['Label'] if ('Label' in data) else data['gnd']
@@ -73,11 +74,17 @@ def load_mat(dataset_name):
     
     ano_labels = np.squeeze(np.array(label))
     
-    # [NOTE: Keeping simplified train/val/test split for this utility function]
+    # Random stratified split: 80% train, 10% val, 10% test
     num_node = adj.shape[0]
-    idx_train = np.arange(int(num_node * 0.3))
-    idx_val = np.arange(int(num_node * 0.1))
-    idx_test = np.arange(num_node - int(num_node * 0.4))
+    indices = np.arange(num_node)
+    stratify = ano_labels if ano_labels is not None else None  # Stratify بر اساس ano_labels برای حفظ توزیع anomalies
+    
+    # Split to train (80%) and temp (20%)
+    idx_train, temp_idx = train_test_split(indices, test_size=0.2, random_state=42, stratify=stratify)
+    
+    # Split temp to val (10%) and test (10%)
+    stratify_temp = ano_labels[temp_idx] if ano_labels is not None else None
+    idx_val, idx_test = train_test_split(temp_idx, test_size=0.5, random_state=42, stratify=stratify_temp)
     
     if 'str_anomaly_label' in data:
         str_ano_labels = np.squeeze(np.array(data['str_anomaly_label']))
@@ -94,6 +101,7 @@ def adj_to_dgl_graph(adj):
     nx_graph = nx.from_scipy_sparse_array(adj)
     dgl_graph = dgl.DGLGraph(nx_graph)
     return dgl_graph
+
 # فقط این ۳ تا تابع رو به انتهای utils.py اضافه کن
 
 # فقط این ۳ تا تابع رو در utils.py کپی کن (جایگزین قبلی‌ها کن)
