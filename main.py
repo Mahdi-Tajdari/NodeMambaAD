@@ -1,4 +1,4 @@
-# main.py - نسخه با cosine reconstruction loss + d_state=64
+# main.py - نسخه با scheduler on val for less overfit + GCN + wd=5e-3
 import numpy as np
 import scipy.sparse as sp
 import torch
@@ -15,7 +15,7 @@ from torch_geometric.utils import to_undirected
 # توابع خودمون
 from utils import load_mat, preprocess_features, adj_to_dgl_graph, get_topk_neighbors_dgl
 from utils import structural_encoding_from_adj, compute_rq_from_adj
-from models import NodeGLADMamba  # مدل با k=32 و d_state=64
+from models import NodeGLADMamba  # مدل با GCN + focal-like
 
 # Seed
 class Args:
@@ -57,7 +57,7 @@ x_raw = features_tensor[0]  # [N, F]
 print("Computing structural encoding...")
 x_struct = structural_encoding_from_adj(edge_index, nb_nodes).to(device)  # [N, 20]
 
-# Top-k neighbors (k=32 برای گسترش توالی Mamba)
+# Top-k neighbors (k=32)
 print("Computing top-k neighbors...")
 neighbors = get_topk_neighbors_dgl(dgl_graph, k=32).to(device)  # [N, 32]
 
@@ -68,12 +68,16 @@ rq = compute_rq_from_adj(x_raw, edge_index).to(device)
 # Labels
 ano_label_tensor = torch.FloatTensor(ano_label).to(device)
 
+# Clear GPU memory
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+
 # ------------------- 4. Model & Optimizer -------------------
-model = NodeGLADMamba(feat_dim=ft_size, hidden_dim=128, k=32).to(device)  # k=32 و d_state=64 اعمال شد
-optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5, weight_decay=5e-4)
+model = NodeGLADMamba(feat_dim=ft_size, hidden_dim=128, k=32).to(device)
+optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5, weight_decay=5e-3)  # higher wd
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=10, verbose=True)
 
-print("Training شروع شد — با cosine reconstruction loss + d_state=64")
+print("Training شروع شد — با scheduler on val + GCN + wd=5e-3 for less overfit")
 print("-" * 70)
 
 best_auc_val = 0.0
@@ -82,38 +86,35 @@ best_epoch = 0
 patience = 150
 counter = 0
 
-for epoch in range(1, 501):
+for epoch in range(1, 170):
     model.train()
     optimizer.zero_grad()
 
-    out1, out2, score = model(x_raw, x_struct, edge_index, neighbors, rq)  # forward out1, out2, score
-
-    target = torch.ones(out1.size(0), device=device)  # for positive pairs
-    loss = F.cosine_embedding_loss(out1, out2, target)  # mean(1 - cos_sim), scale ~0-2
+    loss, score = model(x_raw, x_struct, edge_index, neighbors, rq)
 
     loss.backward()
-    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
     optimizer.step()
 
     model.eval()
     with torch.no_grad():
-        _, _, score_eval = model(x_raw, x_struct, edge_index, neighbors, rq)
+        _, score_eval = model(x_raw, x_struct, edge_index, neighbors, rq)
         auc_val = roc_auc_score(ano_label[idx_val], score_eval[idx_val].cpu().numpy())
         auc_test = roc_auc_score(ano_label[idx_test], score_eval[idx_test].cpu().numpy())
         print(f"Epoch {epoch:03d} | Loss: {loss.item():.6f} | Val AUC: {auc_val:.4f} | Test AUC: {auc_test:.4f} | Best Test AUC: {best_auc_test:.4f} | Grad Norm: {grad_norm:.4f}")
 
-        scheduler.step(auc_test)
+        scheduler.step(auc_val)  # on val for less overfit to test
 
-        if auc_test > best_auc_test:
-            best_auc_test = auc_test
+        if auc_val > best_auc_val:
             best_auc_val = auc_val
+            best_auc_test = auc_test
             best_epoch = epoch
             torch.save(model.state_dict(), 'best_model.pt')
             counter = 0
         else:
             counter += 1
             if counter >= patience:
-                print(f"Early stopping at epoch {epoch} — بهترین Test AUC: {best_auc_test:.4f}")
+                print(f"Early stopping at epoch {epoch} — بهترین Val AUC: {best_auc_val:.4f}")
                 break
     model.train()
 
@@ -121,7 +122,7 @@ for epoch in range(1, 501):
 model.load_state_dict(torch.load('best_model.pt'))
 model.eval()
 with torch.no_grad():
-    _, _, score = model(x_raw, x_struct, edge_index, neighbors, rq)
+    _, score = model(x_raw, x_struct, edge_index, neighbors, rq)
 
 # Overall AUC (on all data)
 auc_overall = roc_auc_score(ano_label, score.cpu().numpy())

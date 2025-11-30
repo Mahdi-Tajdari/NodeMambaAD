@@ -1,4 +1,4 @@
-# models.py - نسخه با cosine loss فیکس‌شده + norm on out
+# models.py - نسخه با GCN + focal original_loss for focus on hard anomalies
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,7 +11,7 @@ class NodeGLADMamba(nn.Module):
         self.k = k
         self.hidden_dim = hidden_dim
         
-        # سه لایه GCN (همون قبلی)
+        # سه لایه GCN
         self.gnn_feat = nn.ModuleList([
             GCNConv(feat_dim, hidden_dim),
             GCNConv(hidden_dim, hidden_dim),
@@ -23,14 +23,14 @@ class NodeGLADMamba(nn.Module):
             GCNConv(hidden_dim, hidden_dim)
         ])
         
-        # Mamba با d_state=64 برای بهتر capturing
-        self.mamba1 = Mamba(d_model=hidden_dim, d_state=64, d_conv=4, expand=4)
-        self.mamba2 = Mamba(d_model=hidden_dim, d_state=64, d_conv=4, expand=4)
+        # Mamba با d_state=32
+        self.mamba1 = Mamba(d_model=hidden_dim, d_state=32, d_conv=4, expand=4)
+        self.mamba2 = Mamba(d_model=hidden_dim, d_state=32, d_conv=4, expand=4)
         
         self.norm = nn.LayerNorm(hidden_dim)
         self.dropout = nn.Dropout(0.4)
         self.rq_weight = nn.Parameter(torch.tensor(0.5))
-        self.out_norm = nn.LayerNorm(hidden_dim)  # new for cosine
+        self.contrast_lambda = 0.5
 
     def forward(self, x, x_struct, edge_index, neighbors, rq):
         h = x
@@ -45,21 +45,44 @@ class NodeGLADMamba(nn.Module):
             h = self.dropout(h)
         h_struct = self.norm(h)
         
-        seq1 = torch.cat([h_feat.unsqueeze(1), h_struct[neighbors]], dim=1)  # [N,33,128]
-        seq2 = torch.cat([h_struct.unsqueeze(1), h_feat[neighbors]], dim=1)
+        # Anonymize target
+        seq1 = torch.cat([torch.zeros_like(h_feat.unsqueeze(1)), h_struct[neighbors]], dim=1)
+        seq2 = torch.cat([torch.zeros_like(h_struct.unsqueeze(1)), h_feat[neighbors]], dim=1)
         
         out1 = self.mamba1(seq1)[:, 0, :]
         out2 = self.mamba2(seq2.flip(1))[:, 0, :]
         
-        out1 = self.out_norm(out1)  # normalize for cosine
-        out2 = self.out_norm(out2)
+        # Negative samples (lighter: only one)
+        neg_indices = torch.randperm(neighbors.size(0), device=neighbors.device)
+        neg_neighbors = neighbors[neg_indices]
+        seq1_neg = torch.cat([torch.zeros_like(h_feat.unsqueeze(1)), h_struct[neg_neighbors]], dim=1)
+        out1_neg = self.mamba1(seq1_neg)[:, 0, :]
         
-        diff = F.mse_loss(out1, out2, reduction='none').mean(dim=1)  # still for score
+        # Positive cos
+        cos_pos = F.cosine_similarity(out1, out2, dim=1)
+        # Negative
+        cos_neg = F.cosine_similarity(out1, out1_neg, dim=1)
         
+        # Contrastive loss
+        logits_pos = cos_pos.unsqueeze(1)
+        logits_neg = cos_neg.unsqueeze(1)
+        labels = torch.zeros(out1.size(0), dtype=torch.long, device=out1.device)
+        contrast_loss = F.cross_entropy(torch.cat([logits_pos, logits_neg], dim=1), labels)
+        
+        # Score
+        diff = F.mse_loss(out1, out2, reduction='none').mean(dim=1)
         rq_score = rq.squeeze()
         rq_score = torch.sigmoid(rq_score / (rq_score.mean() + 1e-8))
         rq_score = torch.clamp(rq_score, min=0.0, max=2.0)
-        
         score = torch.clamp(diff, min=0.0, max=5.0) + torch.sigmoid(self.rq_weight) * rq_score
-
-        return out1, out2, score  # out1, out2 normalized for loss, score clamped for eval
+        
+        # Focal-like original_loss for focus on high score (anomalies)
+        gamma = 2.0
+        original_loss = - ( (1 - torch.sigmoid(score)) ** gamma * F.logsigmoid(score) ).mean()
+        
+        loss = self.contrast_lambda * contrast_loss + (1 - self.contrast_lambda) * original_loss
+        
+        if self.training:
+            return loss, score
+        else:
+            return None, score
