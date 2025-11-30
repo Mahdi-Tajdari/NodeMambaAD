@@ -1,4 +1,4 @@
-# run.py - نسخه با k=32 برای تست مرحله‌ای
+# main.py - نسخه با cosine reconstruction loss + d_state=64
 import numpy as np
 import scipy.sparse as sp
 import torch
@@ -15,7 +15,7 @@ from torch_geometric.utils import to_undirected
 # توابع خودمون
 from utils import load_mat, preprocess_features, adj_to_dgl_graph, get_topk_neighbors_dgl
 from utils import structural_encoding_from_adj, compute_rq_from_adj
-from models import NodeGLADMamba  # مدل با k=32
+from models import NodeGLADMamba  # مدل با k=32 و d_state=64
 
 # Seed
 class Args:
@@ -69,11 +69,11 @@ rq = compute_rq_from_adj(x_raw, edge_index).to(device)
 ano_label_tensor = torch.FloatTensor(ano_label).to(device)
 
 # ------------------- 4. Model & Optimizer -------------------
-model = NodeGLADMamba(feat_dim=ft_size, hidden_dim=128, k=32).to(device)  # k=32 اعمال شد
+model = NodeGLADMamba(feat_dim=ft_size, hidden_dim=128, k=32).to(device)  # k=32 و d_state=64 اعمال شد
 optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5, weight_decay=5e-4)
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=20, verbose=True)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=10, verbose=True)
 
-print("Training شروع شد — فقط با k=32 (بدون تغییر loss)")
+print("Training شروع شد — با cosine reconstruction loss + d_state=64")
 print("-" * 70)
 
 best_auc_val = 0.0
@@ -82,22 +82,22 @@ best_epoch = 0
 patience = 150
 counter = 0
 
-for epoch in range(1, 100):
+for epoch in range(1, 501):
     model.train()
     optimizer.zero_grad()
 
-    score = model(x_raw, x_struct, edge_index, neighbors, rq)  # [N]
+    out1, out2, score = model(x_raw, x_struct, edge_index, neighbors, rq)  # forward out1, out2, score
 
-    score_clamped = torch.clamp(score, min=0.0, max=50.0)
-    loss = -score_clamped.mean()
+    target = torch.ones(out1.size(0), device=device)  # for positive pairs
+    loss = F.cosine_embedding_loss(out1, out2, target)  # mean(1 - cos_sim), scale ~0-2
 
     loss.backward()
-    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.05)
+    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
     optimizer.step()
 
     model.eval()
     with torch.no_grad():
-        score_eval = model(x_raw, x_struct, edge_index, neighbors, rq)
+        _, _, score_eval = model(x_raw, x_struct, edge_index, neighbors, rq)
         auc_val = roc_auc_score(ano_label[idx_val], score_eval[idx_val].cpu().numpy())
         auc_test = roc_auc_score(ano_label[idx_test], score_eval[idx_test].cpu().numpy())
         print(f"Epoch {epoch:03d} | Loss: {loss.item():.6f} | Val AUC: {auc_val:.4f} | Test AUC: {auc_test:.4f} | Best Test AUC: {best_auc_test:.4f} | Grad Norm: {grad_norm:.4f}")
@@ -121,7 +121,7 @@ for epoch in range(1, 100):
 model.load_state_dict(torch.load('best_model.pt'))
 model.eval()
 with torch.no_grad():
-    score = model(x_raw, x_struct, edge_index, neighbors, rq)
+    _, _, score = model(x_raw, x_struct, edge_index, neighbors, rq)
 
 # Overall AUC (on all data)
 auc_overall = roc_auc_score(ano_label, score.cpu().numpy())
