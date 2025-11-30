@@ -1,4 +1,4 @@
-# models.py - نسخه با k=32 (بدون تغییر دیگر)
+# models.py - نسخه با cosine loss فیکس‌شده + norm on out
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -23,13 +23,14 @@ class NodeGLADMamba(nn.Module):
             GCNConv(hidden_dim, hidden_dim)
         ])
         
-        # Mamba با d_state=16
-        self.mamba1 = Mamba(d_model=hidden_dim, d_state=16, d_conv=4, expand=4)
-        self.mamba2 = Mamba(d_model=hidden_dim, d_state=16, d_conv=4, expand=4)
+        # Mamba با d_state=64 برای بهتر capturing
+        self.mamba1 = Mamba(d_model=hidden_dim, d_state=64, d_conv=4, expand=4)
+        self.mamba2 = Mamba(d_model=hidden_dim, d_state=64, d_conv=4, expand=4)
         
         self.norm = nn.LayerNorm(hidden_dim)
         self.dropout = nn.Dropout(0.4)
         self.rq_weight = nn.Parameter(torch.tensor(0.5))
+        self.out_norm = nn.LayerNorm(hidden_dim)  # new for cosine
 
     def forward(self, x, x_struct, edge_index, neighbors, rq):
         h = x
@@ -44,18 +45,21 @@ class NodeGLADMamba(nn.Module):
             h = self.dropout(h)
         h_struct = self.norm(h)
         
-        seq1 = torch.cat([h_feat.unsqueeze(1), h_struct[neighbors]], dim=1)  # [N,33,128] با k=32
+        seq1 = torch.cat([h_feat.unsqueeze(1), h_struct[neighbors]], dim=1)  # [N,33,128]
         seq2 = torch.cat([h_struct.unsqueeze(1), h_feat[neighbors]], dim=1)
         
         out1 = self.mamba1(seq1)[:, 0, :]
         out2 = self.mamba2(seq2.flip(1))[:, 0, :]
-
-        diff = F.mse_loss(out1, out2, reduction='none').mean(dim=1)
-        diff = torch.clamp(diff, min=0.0, max=5.0)
-
+        
+        out1 = self.out_norm(out1)  # normalize for cosine
+        out2 = self.out_norm(out2)
+        
+        diff = F.mse_loss(out1, out2, reduction='none').mean(dim=1)  # still for score
+        
         rq_score = rq.squeeze()
         rq_score = torch.sigmoid(rq_score / (rq_score.mean() + 1e-8))
         rq_score = torch.clamp(rq_score, min=0.0, max=2.0)
+        
+        score = torch.clamp(diff, min=0.0, max=5.0) + torch.sigmoid(self.rq_weight) * rq_score
 
-        score = diff + torch.sigmoid(self.rq_weight) * rq_score
-        return score  # بدون out1/out2 (loss تغییر نکرده)
+        return out1, out2, score  # out1, out2 normalized for loss, score clamped for eval
