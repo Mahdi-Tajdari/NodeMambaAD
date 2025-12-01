@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Distribution / packaging
+.Python
+build/
+dist/
+*.egg-info/
+*.wheels/
+
+# Environments
+.env
+.venv
+env/
+venv/
+
+# Specific to NodeMambaAD
+*.pt
+best_model.pt
+
+# Jupyter Notebook
+.ipynb_checkpoints
