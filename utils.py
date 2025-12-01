@@ -59,7 +59,7 @@ def dense_to_one_hot(labels_dense, num_classes):
 
 def load_mat(dataset_name):
     """Load .mat dataset with random stratified split (80/10/10)."""
-    data = sio.loadmat("./{}.mat".format(dataset_name))
+    data = sio.loadmat("./data/{}.mat".format(dataset_name))
     
     label = data['Label'] if ('Label' in data) else data['gnd']
     attr = data['Attributes'] if ('Attributes' in data) else data['X']
