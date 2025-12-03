@@ -102,36 +102,6 @@ def adj_to_dgl_graph(adj):
     dgl_graph = dgl.DGLGraph(nx_graph)
     return dgl_graph
 
-# فقط این ۳ تا تابع رو به انتهای utils.py اضافه کن
-
-# فقط این ۳ تا تابع رو در utils.py کپی کن (جایگزین قبلی‌ها کن)
-
-# utils.py — این تابع رو دقیقاً جایگزین کن (فقط همین یکی!)
-def get_topk_neighbors_dgl(g, k=8):
-    """سازگار با DGL قدیمی + بدون .device + بدون .number_of_nodes() مشکل"""
-    num_nodes = g.number_of_nodes()  # درست برای DGL قدیمی
-    adj = g.adjacency_matrix(transpose=False).coalesce()
-    src, dst = adj.indices()[0], adj.indices()[1]  # src: منبع، dst: مقصد
-
-    neighbors = []
-    for i in range(num_nodes):
-        neigh = dst[src == i]  # همسایه‌های نود i
-        
-        if len(neigh) == 0:
-            neigh = torch.tensor([i], dtype=torch.long)
-        elif len(neigh) > k:
-            # بدون استفاده از g.device — خود تنسور می‌دونه کجاست
-            perm = torch.randperm(len(neigh))[:k]
-            neigh = neigh[perm]
-        else:
-            # پد با خود نود
-            pad = torch.full((k - len(neigh),), i, dtype=torch.long, device=neigh.device if len(neigh) > 0 else torch.device('cpu'))
-            neigh = torch.cat([neigh, pad], dim=0)
-        
-        neighbors.append(neigh)
-    
-    return torch.stack(neighbors)  # [N, k]
-
 # utils.py — نسخه ۱۰۰٪ درست و بدون خطا (کپی کن جایگزین کن)
 # utils.py (بقیه توابع نگه دار)
 
@@ -255,3 +225,42 @@ def compute_rq_from_adj(x, edge_index):
     rq = torch.relu(rq)
     
     return rq  # [N, 1]
+
+# تابع جدید: ساخت random walks برای هر نود
+# ... (بقیه utils.py بدون تغییر)
+
+import networkx as nx  # اضافه کن اگر نبود
+
+def get_random_walks(g, num_walks=16, walk_length=8, device=torch.device('cpu')):
+    """ساخت random walks با NetworkX برای جلوگیری از مشکل DGL قدیمی"""
+    # اول dgl_graph رو به nx تبدیل کن (اگر nx_graph نداری)
+    nx_g = g.to_networkx().to_undirected()  # تبدیل به nx برای homogeneous
+    num_nodes = nx_g.number_of_nodes()
+    
+    walks = []
+    for node in range(num_nodes):
+        node_walks = []
+        for _ in range(num_walks):
+            walk = [node]
+            current = node
+            for _ in range(walk_length):
+                neighbors = list(nx_g.neighbors(current))
+                if not neighbors:
+                    current = node  # اگر isolated، با self پد کن
+                else:
+                    current = random.choice(neighbors)
+                walk.append(current)
+            node_walks.append(walk)
+        walks.append(node_walks)
+    
+    walks_tensor = torch.tensor(walks, device=device)  # [N, num_walks, walk_length + 1]
+    return walks_tensor
+def perturb_walks(walks):
+    """Perturb walks با shuffle nodes در هر walk"""
+    num_nodes = walks.size(0)
+    perturbed = walks.clone()
+    for i in range(num_nodes):
+        for j in range(walks.size(1)):
+            perm = torch.randperm(walks.size(2))
+            perturbed[i, j] = perturbed[i, j][perm]
+    return perturbed

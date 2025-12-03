@@ -1,4 +1,4 @@
-# main.py - نسخه با scheduler on val for less overfit + GCN + wd=5e-3
+# main.py - گام 1.5: optimize hyperparams برای Mamba base
 import numpy as np
 import scipy.sparse as sp
 import torch
@@ -13,13 +13,13 @@ import dgl
 from torch_geometric.utils import to_undirected
 
 # توابع خودمون
-from utils import load_mat, preprocess_features, adj_to_dgl_graph, get_topk_neighbors_dgl
-from utils import structural_encoding_from_adj, compute_rq_from_adj
-from models import NodeGLADMamba  # مدل با GCN + focal-like
+from utils import load_mat, preprocess_features, adj_to_dgl_graph, get_random_walks
+from utils import structural_encoding_from_adj, compute_rq_from_adj, perturb_walks
+from models import NodeMambaAD  # مدل optimize شده
 
 # Seed
 class Args:
-    dataset = 'cora'
+    dataset = 'citeseer'
     seed = 42
 
 args = Args()
@@ -53,31 +53,27 @@ edge_index = to_undirected(edge_index).to(device)
 features_tensor = torch.FloatTensor(features[np.newaxis]).to(device)
 x_raw = features_tensor[0]  # [N, F]
 
-# Structural Encoding (20 فیچر)
 print("Computing structural encoding...")
-x_struct = structural_encoding_from_adj(edge_index, nb_nodes).to(device)  # [N, 20]
+x_struct = structural_encoding_from_adj(edge_index, nb_nodes).to(device)
 
-# Top-k neighbors (k=32)
-print("Computing top-k neighbors...")
-neighbors = get_topk_neighbors_dgl(dgl_graph, k=32).to(device)  # [N, 32]
+print("Computing random walks...")
+walks = get_random_walks(dgl_graph, num_walks=8, walk_length=6, device=device).to(device)  # بزرگ‌تر
 
-# Rayleigh Quotient
 print("Computing Rayleigh Quotient...")
 rq = compute_rq_from_adj(x_raw, edge_index).to(device)
 
 # Labels
 ano_label_tensor = torch.FloatTensor(ano_label).to(device)
 
-# Clear GPU memory
 if torch.cuda.is_available():
     torch.cuda.empty_cache()
 
 # ------------------- 4. Model & Optimizer -------------------
-model = NodeGLADMamba(feat_dim=ft_size, hidden_dim=128, k=32).to(device)
-optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5, weight_decay=5e-3)  # higher wd
+model = NodeMambaAD(feat_dim=ft_size, hidden_dim=128).to(device)
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=5e-3)  # lr بالاتر
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=10, verbose=True)
 
-print("Training شروع شد — با scheduler on val + GCN + wd=5e-3 for less overfit")
+print("Training شروع شد — گام 1.5: optimize base Mamba")
 print("-" * 70)
 
 best_auc_val = 0.0
@@ -89,8 +85,11 @@ counter = 0
 for epoch in range(1, 170):
     model.train()
     optimizer.zero_grad()
+    
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
-    loss, score = model(x_raw, x_struct, edge_index, neighbors, rq)
+    loss, score = model(x_raw, edge_index, walks, rq)
 
     loss.backward()
     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -98,12 +97,12 @@ for epoch in range(1, 170):
 
     model.eval()
     with torch.no_grad():
-        _, score_eval = model(x_raw, x_struct, edge_index, neighbors, rq)
+        _, score_eval = model(x_raw, edge_index, walks, rq)
         auc_val = roc_auc_score(ano_label[idx_val], score_eval[idx_val].cpu().numpy())
         auc_test = roc_auc_score(ano_label[idx_test], score_eval[idx_test].cpu().numpy())
         print(f"Epoch {epoch:03d} | Loss: {loss.item():.6f} | Val AUC: {auc_val:.4f} | Test AUC: {auc_test:.4f} | Best Test AUC: {best_auc_test:.4f} | Grad Norm: {grad_norm:.4f}")
 
-        scheduler.step(auc_val)  # on val for less overfit to test
+        scheduler.step(auc_val)
 
         if auc_val > best_auc_val:
             best_auc_val = auc_val
@@ -122,14 +121,13 @@ for epoch in range(1, 170):
 model.load_state_dict(torch.load('best_model.pt'))
 model.eval()
 with torch.no_grad():
-    _, score = model(x_raw, x_struct, edge_index, neighbors, rq)
+    _, score = model(x_raw, edge_index, walks, rq)
 
-# Overall AUC (on all data)
 auc_overall = roc_auc_score(ano_label, score.cpu().numpy())
 print(f"\nتموم شد! بهترین Val AUC: {best_auc_val:.4f} | بهترین Test AUC: {best_auc_test:.4f} در epoch {best_epoch}")
 print(f"Overall AUC: {auc_overall:.4f}")
 
-# Find best threshold on validation set using F1 score
+# Threshold and metrics (همون قبلی)
 thresholds = np.linspace(0, score.max().item(), 100)
 best_thresh = 0.0
 best_f1_val = 0.0
@@ -140,7 +138,6 @@ for thresh in thresholds:
         best_f1_val = f1_val
         best_thresh = thresh
 
-# Metrics on test set
 pred_test = (score[idx_test].cpu().numpy() > best_thresh).astype(int)
 tn, fp, fn, tp = confusion_matrix(ano_label[idx_test], pred_test).ravel()
 precision_test, recall_test, f1_test, _ = precision_recall_fscore_support(ano_label[idx_test], pred_test, average='binary', zero_division=0)
@@ -149,7 +146,6 @@ print(f"\nTest Metrics (Threshold: {best_thresh:.4f}):")
 print(f"TP: {tp} | TN: {tn} | FP: {fp} | FN: {fn}")
 print(f"Precision: {precision_test:.4f} | Recall: {recall_test:.4f} | F1: {f1_test:.4f}")
 
-# Metrics on overall data (for completeness)
 pred_overall = (score.cpu().numpy() > best_thresh).astype(int)
 tn_o, fp_o, fn_o, tp_o = confusion_matrix(ano_label, pred_overall).ravel()
 precision_o, recall_o, f1_o, _ = precision_recall_fscore_support(ano_label, pred_overall, average='binary', zero_division=0)
@@ -158,4 +154,4 @@ print(f"\nOverall Metrics (Threshold: {best_thresh:.4f}):")
 print(f"TP: {tp_o} | TN: {tn_o} | FP: {fp_o} | FN: {fn_o}")
 print(f"Precision: {precision_o:.4f} | Recall: {recall_o:.4f} | F1: {f1_o:.4f}")
 
-print("اگر AUC بالاتر رفت، تغییر بعدی رو بگو!")
+print("اگر AUC بهتر شد، تغییر بعدی رو بگو! — حالا optimize Mamba رو تست کن")
