@@ -8,7 +8,7 @@ import random
 import os
 from sklearn.metrics import roc_auc_score, confusion_matrix, precision_recall_fscore_support, f1_score
 from torch.cuda.amp import autocast, GradScaler
-from torch_geometric.utils import subgraph  # for relabel
+from torch_geometric.utils import subgraph # for relabel
 
 # DGL + PyG + Mamba
 import dgl
@@ -16,22 +16,46 @@ import dgl
 # توابع خودمون
 from utils import load_mat, preprocess_features, adj_to_dgl_graph, get_topk_neighbors_dgl
 from utils import structural_encoding_from_adj, compute_rq_from_adj
-from models import NodeGLADMambaRecon  # مدل جدید با reconstruction
+from models import NodeGLADMambaRecon # مدل جدید با reconstruction
 
-# Seed
-class Args:
-    dataset = 'bitcoinotc'
-    seed = 42
-    batch_size = 4096  # adjust if needed
+import argparse
+import datetime
 
-args = Args()
+parser = argparse.ArgumentParser(description='Graph Anomaly Detection with Mamba')
+
+# Dataset and seed
+parser.add_argument('--dataset', type=str, default='cora', help='Dataset name (e.g., cora, bitcoinotc)')
+parser.add_argument('--seed', type=int, default=42, help='Random seed')
+
+# Training params
+parser.add_argument('--batch_size', type=int, default=4096, help='Batch size')
+parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
+parser.add_argument('--weight_decay', type=float, default=5e-3, help='Weight decay')
+parser.add_argument('--epochs', type=int, default=70, help='Max epochs')
+parser.add_argument('--patience', type=int, default=150, help='Early stopping patience')
+
+# Model params
+parser.add_argument('--hidden_dim', type=int, default=128, help='Hidden dimension')
+parser.add_argument('--k_neighbors', type=int, default=32, help='Number of top-k neighbors')
+parser.add_argument('--d_state', type=int, default=32, help='Mamba d_state')
+parser.add_argument('--lambda_recon', type=float, default=0.3, help='Reconstruction loss weight')
+parser.add_argument('--contrast_lambda', type=float, default=0.5, help='Contrastive loss weight')
+parser.add_argument('--dropout', type=float, default=0.4, help='Dropout rate')
+parser.add_argument('--gamma_focal', type=float, default=2.0, help='Gamma for focal loss')
+
+# Other
+parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', help='Device')
+parser.add_argument('--log_dir', type=str, default='./logs', help='Directory for log files')
+
+args = parser.parse_args()
+
 random.seed(args.seed)
 np.random.seed(args.seed)
 torch.manual_seed(args.seed)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(args.seed)
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device(args.device)
 print(f"Using device: {device}")
 
 # ------------------- 1. Load Data -------------------
@@ -48,19 +72,19 @@ dgl_graph = adj_to_dgl_graph(adj).to(device)
 # ------------------- 2. Build edge_index -------------------
 raw_adj = load_mat(args.dataset)[0]
 row, col = raw_adj.nonzero()
-edge_index = torch.stack([torch.LongTensor(row), torch.LongTensor(col)]).to(device)  # directed for BitcoinOTC
+edge_index = torch.stack([torch.LongTensor(row), torch.LongTensor(col)]).to(device) # directed for BitcoinOTC
 
 # ------------------- 3. Prepare Inputs -------------------
 features_tensor = torch.FloatTensor(features[np.newaxis]).to(device)
-x_raw = features_tensor[0]  # [N, F]
+x_raw = features_tensor[0] # [N, F]
 
 # Structural Encoding (20 فیچر)
 print("Computing structural encoding...")
-x_struct = structural_encoding_from_adj(edge_index, nb_nodes).to(device)  # [N, 20]
+x_struct = structural_encoding_from_adj(edge_index, nb_nodes).to(device) # [N, 20]
 
 # Top-k neighbors (k=32)
 print("Computing top-k neighbors...")
-neighbors = get_topk_neighbors_dgl(dgl_graph, k=32).to(device)  # [N, 32]
+neighbors = get_topk_neighbors_dgl(dgl_graph, k=args.k_neighbors).to(device) # [N, k]
 
 # Rayleigh Quotient
 print("Computing Rayleigh Quotient...")
@@ -74,8 +98,8 @@ if torch.cuda.is_available():
     torch.cuda.empty_cache()
 
 # ------------------- 4. Model & Optimizer -------------------
-model = NodeGLADMambaRecon(feat_dim=ft_size, hidden_dim=64, k=32).to(device)
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=5e-3)
+model = NodeGLADMambaRecon(feat_dim=ft_size, args=args).to(device)
+optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=10, verbose=True)
 scaler = GradScaler()
 
@@ -85,12 +109,11 @@ print("-" * 70)
 best_auc_val = 0.0
 best_auc_test = 0.0
 best_epoch = 0
-patience = 150
 counter = 0
 
 node_indices = torch.arange(nb_nodes, device=device)
 
-for epoch in range(1, 230):
+for epoch in range(1, args.epochs):
     model.train()
     total_loss = 0.0
     score_train = torch.zeros(nb_nodes, device=device)
@@ -98,7 +121,7 @@ for epoch in range(1, 230):
     perm = torch.randperm(nb_nodes, device=device)
     for i in range(0, nb_nodes, args.batch_size):
         optimizer.zero_grad()
-        batch_idx = perm[i:i + args.batch_size].sort()[0]  # sort for subgraph
+        batch_idx = perm[i:i + args.batch_size].sort()[0] # sort for subgraph
         
         with autocast():
             # Relabel edge_index for batch
@@ -113,7 +136,7 @@ for epoch in range(1, 230):
             mask_outside = batch_neighbors == -1
             if mask_outside.any():
                 # Pad with self (local index)
-                self_indices = torch.arange(len(batch_idx), device=device).unsqueeze(1).repeat(1, model.k)
+                self_indices = torch.arange(len(batch_idx), device=device).unsqueeze(1).repeat(1, args.k_neighbors)
                 batch_neighbors[mask_outside] = self_indices[mask_outside]
             
             batch_x = x_raw[batch_idx]
@@ -147,7 +170,7 @@ for epoch in range(1, 230):
                 batch_neighbors = global_to_local[batch_neighbors_global]
                 mask_outside = batch_neighbors == -1
                 if mask_outside.any():
-                    self_indices = torch.arange(len(batch_idx), device=device).unsqueeze(1).repeat(1, model.k)
+                    self_indices = torch.arange(len(batch_idx), device=device).unsqueeze(1).repeat(1, args.k_neighbors)
                     batch_neighbors[mask_outside] = self_indices[mask_outside]
                 
                 batch_x = x_raw[batch_idx]
@@ -161,7 +184,7 @@ for epoch in range(1, 230):
         auc_test = roc_auc_score(ano_label_tensor[idx_test].cpu().numpy(), score_eval[idx_test].cpu().numpy())
         print(f"Epoch {epoch:03d} | Loss: {avg_loss:.6f} | Val AUC: {auc_val:.4f} | Test AUC: {auc_test:.4f} | Best Test AUC: {best_auc_test:.4f}")
 
-        scheduler.step(auc_val)  # on val for less overfit to test
+        scheduler.step(auc_val) # on val for less overfit to test
 
         if auc_val > best_auc_val:
             best_auc_val = auc_val
@@ -171,7 +194,7 @@ for epoch in range(1, 230):
             counter = 0
         else:
             counter += 1
-            if counter >= patience:
+            if counter >= args.patience:
                 print(f"Early stopping at epoch {epoch} — بهترین Val AUC: {best_auc_val:.4f}")
                 break
 
@@ -193,7 +216,7 @@ with torch.no_grad():
             batch_neighbors = global_to_local[batch_neighbors_global]
             mask_outside = batch_neighbors == -1
             if mask_outside.any():
-                self_indices = torch.arange(len(batch_idx), device=device).unsqueeze(1).repeat(1, model.k)
+                self_indices = torch.arange(len(batch_idx), device=device).unsqueeze(1).repeat(1, args.k_neighbors)
                 batch_neighbors[mask_outside] = self_indices[mask_outside]
             
             batch_x = x_raw[batch_idx]
@@ -238,3 +261,46 @@ print(f"TP: {tp_o} | TN: {tn_o} | FP: {fp_o} | FN: {fn_o}")
 print(f"Precision: {precision_o:.4f} | Recall: {recall_o:.4f} | F1: {f1_o:.4f}")
 
 print("اگر AUC بالاتر رفت، تغییر بعدی رو بگو!")
+
+def log_results(args, best_auc_val, best_auc_test, best_epoch, auc_overall, 
+                tp, tn, fp, fn, precision_test, recall_test, f1_test,
+                tp_o, tn_o, fp_o, fn_o, precision_o, recall_o, f1_o, best_thresh):
+    
+    if not os.path.exists(args.log_dir):
+        os.makedirs(args.log_dir)
+    
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(args.log_dir, f"results_{args.dataset}_{timestamp}.txt")
+    
+    with open(log_file, 'w') as f:
+        f.write(f"Dataset: {args.dataset}\n")
+        f.write(f"Seed: {args.seed}\n")
+        f.write(f"Batch Size: {args.batch_size}\n")
+        f.write(f"Learning Rate: {args.lr}\n")
+        f.write(f"Weight Decay: {args.weight_decay}\n")
+        f.write(f"Max Epochs: {args.epochs}\n")
+        f.write(f"Patience: {args.patience}\n")
+        f.write(f"Hidden Dim: {args.hidden_dim}\n")
+        f.write(f"K Neighbors: {args.k_neighbors}\n")
+        f.write(f"Mamba d_state: {args.d_state}\n")
+        f.write(f"Lambda Recon: {args.lambda_recon}\n")
+        f.write(f"Contrast Lambda: {args.contrast_lambda}\n")
+        f.write(f"Dropout: {args.dropout}\n")
+        f.write(f"Gamma Focal: {args.gamma_focal}\n")
+        f.write(f"Device: {args.device}\n")
+        f.write("\nTraining Results:\n")
+        f.write(f"Best Val AUC: {best_auc_val:.4f}\n")
+        f.write(f"Best Test AUC: {best_auc_test:.4f} at epoch {best_epoch}\n")
+        f.write(f"Overall AUC: {auc_overall:.4f}\n")
+        f.write("\nTest Metrics (Threshold: {best_thresh:.4f}):\n")
+        f.write(f"TP: {tp} | TN: {tn} | FP: {fp} | FN: {fn}\n")
+        f.write(f"Precision: {precision_test:.4f} | Recall: {recall_test:.4f} | F1: {f1_test:.4f}\n")
+        f.write("\nOverall Metrics (Threshold: {best_thresh:.4f}):\n")
+        f.write(f"TP: {tp_o} | TN: {tn_o} | FP: {fp_o} | FN: {fn_o}\n")
+        f.write(f"Precision: {precision_o:.4f} | Recall: {recall_o:.4f} | F1: {f1_o:.4f}\n")
+    
+    print(f"Results logged to {log_file}")
+
+log_results(args, best_auc_val, best_auc_test, best_epoch, auc_overall, 
+            tp, tn, fp, fn, precision_test, recall_test, f1_test,
+            tp_o, tn_o, fp_o, fn_o, precision_o, recall_o, f1_o, best_thresh)

@@ -6,31 +6,31 @@ from mamba_ssm import Mamba
 from torch_geometric.nn import GCNConv
 
 class NodeGLADMamba(nn.Module):
-    def __init__(self, feat_dim, hidden_dim=128, k=32):
+    def __init__(self, feat_dim, args):
         super().__init__()
-        self.k = k
-        self.hidden_dim = hidden_dim
+        self.k = args.k_neighbors
+        self.hidden_dim = args.hidden_dim
         
         # سه لایه GCN
         self.gnn_feat = nn.ModuleList([
-            GCNConv(feat_dim, hidden_dim),
-            GCNConv(hidden_dim, hidden_dim),
-            GCNConv(hidden_dim, hidden_dim)
+            GCNConv(feat_dim, self.hidden_dim),
+            GCNConv(self.hidden_dim, self.hidden_dim),
+            GCNConv(self.hidden_dim, self.hidden_dim)
         ])
         self.gnn_struct = nn.ModuleList([
-            GCNConv(20, hidden_dim),
-            GCNConv(hidden_dim, hidden_dim),
-            GCNConv(hidden_dim, hidden_dim)
+            GCNConv(20, self.hidden_dim),
+            GCNConv(self.hidden_dim, self.hidden_dim),
+            GCNConv(self.hidden_dim, self.hidden_dim)
         ])
         
         # Mamba با d_state=32
-        self.mamba1 = Mamba(d_model=hidden_dim, d_state=32, d_conv=4, expand=4)
-        self.mamba2 = Mamba(d_model=hidden_dim, d_state=32, d_conv=4, expand=4)
+        self.mamba1 = Mamba(d_model=self.hidden_dim, d_state=args.d_state, d_conv=4, expand=4)
+        self.mamba2 = Mamba(d_model=self.hidden_dim, d_state=args.d_state, d_conv=4, expand=4)
         
-        self.norm = nn.LayerNorm(hidden_dim)
-        self.dropout = nn.Dropout(0.4)
+        self.norm = nn.LayerNorm(self.hidden_dim)
+        self.dropout = nn.Dropout(args.dropout)
         self.rq_weight = nn.Parameter(torch.tensor(0.5))
-        self.contrast_lambda = 0.5
+        self.contrast_lambda = args.contrast_lambda
 
     def forward(self, x, x_struct, edge_index, neighbors, rq):
         h = x
@@ -77,7 +77,7 @@ class NodeGLADMamba(nn.Module):
         score = torch.clamp(diff, min=0.0, max=5.0) + torch.sigmoid(self.rq_weight) * rq_score
         
         # Focal-like original_loss for focus on high score (anomalies)
-        gamma = 2.0
+        gamma = args.gamma_focal
         original_loss = - ( (1 - torch.sigmoid(score)) ** gamma * F.logsigmoid(score) ).mean()
         
         loss = self.contrast_lambda * contrast_loss + (1 - self.contrast_lambda) * original_loss
@@ -88,36 +88,36 @@ class NodeGLADMamba(nn.Module):
             return None, score
 
 class NodeGLADMambaRecon(nn.Module):
-    def __init__(self, feat_dim, hidden_dim=64, k=32):
+    def __init__(self, feat_dim, args):
         super().__init__()
-        self.k = k
-        self.hidden_dim = hidden_dim
-        
+        self.k = args.k_neighbors
+        self.hidden_dim = args.hidden_dim
+        self.args = args
         # سه لایه GCN
         self.gnn_feat = nn.ModuleList([
-            GCNConv(feat_dim, hidden_dim),
-            GCNConv(hidden_dim, hidden_dim),
-            GCNConv(hidden_dim, hidden_dim)
+            GCNConv(feat_dim, self.hidden_dim),
+            GCNConv(self.hidden_dim, self.hidden_dim),
+            GCNConv(self.hidden_dim, self.hidden_dim)
         ])
         self.gnn_struct = nn.ModuleList([
-            GCNConv(20, hidden_dim),
-            GCNConv(hidden_dim, hidden_dim),
-            GCNConv(hidden_dim, hidden_dim)
+            GCNConv(20, self.hidden_dim),
+            GCNConv(self.hidden_dim, self.hidden_dim),
+            GCNConv(self.hidden_dim, self.hidden_dim)
         ])
         
         # Mamba با d_state=32
-        self.mamba1 = Mamba(d_model=hidden_dim, d_state=32, d_conv=4, expand=4)
-        self.mamba2 = Mamba(d_model=hidden_dim, d_state=32, d_conv=4, expand=4)
+        self.mamba1 = Mamba(d_model=self.hidden_dim, d_state=args.d_state, d_conv=4, expand=4)
+        self.mamba2 = Mamba(d_model=self.hidden_dim, d_state=args.d_state, d_conv=4, expand=4)
         
         # Decoders for reconstruction
-        self.mamba_decode_feat = Mamba(d_model=hidden_dim, d_state=32, d_conv=4, expand=4)
-        self.mamba_decode_struct = Mamba(d_model=hidden_dim, d_state=32, d_conv=4, expand=4)
+        self.mamba_decode_feat = Mamba(d_model=self.hidden_dim, d_state=args.d_state, d_conv=4, expand=4)
+        self.mamba_decode_struct = Mamba(d_model=self.hidden_dim, d_state=args.d_state, d_conv=4, expand=4)
         
-        self.norm = nn.LayerNorm(hidden_dim)
-        self.dropout = nn.Dropout(0.4)
+        self.norm = nn.LayerNorm(self.hidden_dim)
+        self.dropout = nn.Dropout(args.dropout)
         self.rq_weight = nn.Parameter(torch.tensor(0.5))
-        self.contrast_lambda = 0.5
-        self.lambda_recon = 0.3  # tunable
+        self.contrast_lambda = args.contrast_lambda
+        self.lambda_recon = args.lambda_recon # tunable
 
     def forward(self, x, x_struct, edge_index, neighbors, rq):
         h = x
@@ -133,8 +133,8 @@ class NodeGLADMambaRecon(nn.Module):
         h_struct = self.norm(h)
         
         # Sequences for feat and struct
-        seq_feat = torch.cat([h_feat.unsqueeze(1), h_feat[neighbors]], dim=1)  # [N, 1+k, hidden]
-        seq_struct = torch.cat([h_struct.unsqueeze(1), h_struct[neighbors]], dim=1)  # [N, 1+k, hidden]
+        seq_feat = torch.cat([h_feat.unsqueeze(1), h_feat[neighbors]], dim=1) # [N, 1+k, hidden]
+        seq_struct = torch.cat([h_struct.unsqueeze(1), h_struct[neighbors]], dim=1) # [N, 1+k, hidden]
         
         # Anonymize target (like before, but using seq_struct for seq1, etc.)
         seq1 = torch.cat([torch.zeros_like(h_feat.unsqueeze(1)), h_struct[neighbors]], dim=1)
@@ -162,8 +162,8 @@ class NodeGLADMambaRecon(nn.Module):
         
         # Reconstruction
         # Approximate recon from out2 for seq_feat, and out1 for seq_struct
-        recon_seq_feat = self.mamba_decode_feat(out2.unsqueeze(1).repeat(1, self.k + 1, 1))  # [N, 1+k, hidden]
-        recon_seq_struct = self.mamba_decode_struct(out1.unsqueeze(1).repeat(1, self.k + 1, 1))  # [N, 1+k, hidden]
+        recon_seq_feat = self.mamba_decode_feat(out2.unsqueeze(1).repeat(1, self.k + 1, 1)) # [N, 1+k, hidden]
+        recon_seq_struct = self.mamba_decode_struct(out1.unsqueeze(1).repeat(1, self.k + 1, 1)) # [N, 1+k, hidden]
         
         recon_loss = F.mse_loss(recon_seq_feat, seq_feat) + F.mse_loss(recon_seq_struct, seq_struct)
         
@@ -176,7 +176,7 @@ class NodeGLADMambaRecon(nn.Module):
         score = torch.clamp(diff + recon_error, min=0.0, max=5.0) + torch.sigmoid(self.rq_weight) * rq_score
         
         # Focal-like original_loss for focus on high score (anomalies)
-        gamma = 2.0
+        gamma = self.args.gamma_focal
         original_loss = - ( (1 - torch.sigmoid(score)) ** gamma * F.logsigmoid(score) ).mean()
         
         loss = self.lambda_recon * recon_loss + self.contrast_lambda * contrast_loss + (1 - self.contrast_lambda - self.lambda_recon) * original_loss
