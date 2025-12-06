@@ -1,0 +1,28 @@
+Dataset: cora
+Seed: 42
+Batch Size: 4096
+Learning Rate: 0.001
+Weight Decay: 0.005
+Max Epochs: 70
+Patience: 150
+Hidden Dim: 128
+K Neighbors: 32
+Mamba d_state: 32
+Lambda Recon: 0.3
+Contrast Lambda: 0.5
+Dropout: 0.4
+Gamma Focal: 2.0
+Device: cuda
+
+Training Results:
+Best Val AUC: 0.9204
+Best Test AUC: 0.8427 at epoch 51
+Overall AUC: 0.8395
+
+Test Metrics (Threshold: {best_thresh:.4f}):
+TP: 8 | TN: 246 | FP: 10 | FN: 7
+Precision: 0.4444 | Recall: 0.5333 | F1: 0.4848
+
+Overall Metrics (Threshold: {best_thresh:.4f}):
+TP: 69 | TN: 2428 | FP: 130 | FN: 81
+Precision: 0.3467 | Recall: 0.4600 | F1: 0.3954

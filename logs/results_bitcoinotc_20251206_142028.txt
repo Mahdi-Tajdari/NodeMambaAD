@@ -1,0 +1,28 @@
+Dataset: bitcoinotc
+Seed: 42
+Batch Size: 4096
+Learning Rate: 0.001
+Weight Decay: 0.005
+Max Epochs: 70
+Patience: 150
+Hidden Dim: 64
+K Neighbors: 32
+Mamba d_state: 32
+Lambda Recon: 0.3
+Contrast Lambda: 0.5
+Dropout: 0.4
+Gamma Focal: 2.0
+Device: cuda
+
+Training Results:
+Best Val AUC: 0.7638
+Best Test AUC: 0.6456 at epoch 60
+Overall AUC: 0.7250
+
+Test Metrics (Threshold: {best_thresh:.4f}):
+TP: 12 | TN: 532 | FP: 27 | FN: 18
+Precision: 0.3077 | Recall: 0.4000 | F1: 0.3478
+
+Overall Metrics (Threshold: {best_thresh:.4f}):
+TP: 138 | TN: 5383 | FP: 198 | FN: 162
+Precision: 0.4107 | Recall: 0.4600 | F1: 0.4340

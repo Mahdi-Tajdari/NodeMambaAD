@@ -93,6 +93,7 @@ class NodeGLADMambaRecon(nn.Module):
         self.k = args.k_neighbors
         self.hidden_dim = args.hidden_dim
         self.args = args
+        self.lambda_recon_score = nn.Parameter(torch.tensor(0.1))
         # سه لایه GCN
         self.gnn_feat = nn.ModuleList([
             GCNConv(feat_dim, self.hidden_dim),
@@ -172,10 +173,10 @@ class NodeGLADMambaRecon(nn.Module):
         rq_score = rq.squeeze()
         rq_score = torch.sigmoid(rq_score / (rq_score.mean() + 1e-8))
         rq_score = torch.clamp(rq_score, min=0.0, max=2.0)
+        # در forward:
         recon_error = (recon_seq_feat - seq_feat).pow(2).mean(dim=(1,2)) + (recon_seq_struct - seq_struct).pow(2).mean(dim=(1,2))
-        score = torch.clamp(diff + recon_error, min=0.0, max=5.0) + torch.sigmoid(self.rq_weight) * rq_score
-        
-        # Focal-like original_loss for focus on high score (anomalies)
+        recon_error = (recon_error - recon_error.mean()) / (recon_error.std() + 1e-8)  # normalize
+        score = torch.clamp(diff + self.lambda_recon_score * recon_error, min=0.0, max=5.0) + torch.sigmoid(self.rq_weight) * rq_score
         gamma = self.args.gamma_focal
         original_loss = - ( (1 - torch.sigmoid(score)) ** gamma * F.logsigmoid(score) ).mean()
         
