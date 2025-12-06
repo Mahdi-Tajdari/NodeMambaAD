@@ -1,4 +1,4 @@
-# main.py - نسخه با batching + relabel edge_index + local neighbors for BitcoinOTC + fixed ano_label
+# main.py - نسخه با batching + relabel edge_index + local neighbors for BitcoinOTC + fixed ano_label + advanced logging
 import numpy as np
 import scipy.sparse as sp
 import torch
@@ -103,7 +103,7 @@ optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=10, verbose=True)
 scaler = GradScaler()
 
-print("Training شروع شد — با batching + relabel + local neighbors + fixed ano_label")
+print("Training شروع شد — با batching + relabel + local neighbors + fixed ano_label + advanced logging")
 print("-" * 70)
 
 best_auc_val = 0.0
@@ -117,8 +117,16 @@ for epoch in range(1, args.epochs):
     model.train()
     total_loss = 0.0
     score_train = torch.zeros(nb_nodes, device=device)
+    score_no_rq_train = torch.zeros(nb_nodes, device=device)  # NEW
+    recon_loss_total = 0.0  # NEW
+    contrast_loss_total = 0.0  # NEW
+    original_loss_total = 0.0  # NEW
+    diff_total = torch.zeros(nb_nodes, device=device)  # NEW
+    rq_score_total = torch.zeros(nb_nodes, device=device)  # NEW
+    recon_error_total = torch.zeros(nb_nodes, device=device)  # NEW
     
     perm = torch.randperm(nb_nodes, device=device)
+    grad_norm = 0.0  # NEW: accumulate grad norm across batches
     for i in range(0, nb_nodes, args.batch_size):
         optimizer.zero_grad()
         batch_idx = perm[i:i + args.batch_size].sort()[0] # sort for subgraph
@@ -143,19 +151,45 @@ for epoch in range(1, args.epochs):
             batch_struct = x_struct[batch_idx]
             batch_rq = rq[batch_idx]
             
-            loss, batch_score = model(batch_x, batch_struct, batch_edge_index, batch_neighbors, batch_rq)
+            loss, batch_score, batch_recon_loss, batch_contrast_loss, batch_original_loss, batch_score_no_rq, batch_diff, batch_rq_score, batch_recon_error = model(batch_x, batch_struct, batch_edge_index, batch_neighbors, batch_rq)  # NEW: unpack
         
         scaler.scale(loss).backward()
+        
+        # NEW: gradient norm per batch, accumulate
+        batch_grad_norm = 0.0
+        for p in model.parameters():
+            if p.grad is not None:
+                batch_grad_norm += p.grad.norm(2).item() ** 2
+        grad_norm += batch_grad_norm ** 0.5
+        
         scaler.step(optimizer)
         scaler.update()
         
         total_loss += loss.item() * len(batch_idx)
+        recon_loss_total += batch_recon_loss.item() * len(batch_idx)  # NEW
+        contrast_loss_total += batch_contrast_loss.item() * len(batch_idx)  # NEW
+        original_loss_total += batch_original_loss.item() * len(batch_idx)  # NEW
         score_train[batch_idx] = batch_score.detach()
+        score_no_rq_train[batch_idx] = batch_score_no_rq.detach()  # NEW
+        diff_total[batch_idx] = batch_diff.detach()  # NEW
+        rq_score_total[batch_idx] = batch_rq_score.detach()  # NEW
+        recon_error_total[batch_idx] = batch_recon_error.detach()  # NEW
     
     avg_loss = total_loss / nb_nodes
+    avg_recon_loss = recon_loss_total / nb_nodes  # NEW
+    avg_contrast_loss = contrast_loss_total / nb_nodes  # NEW
+    avg_original_loss = original_loss_total / nb_nodes  # NEW
+    grad_norm /= (nb_nodes // args.batch_size + 1)  # average grad norm
+    
+    # NEW: stats for analysis
+    score_mean, score_std = score_train.mean().item(), score_train.std().item()
+    rq_mean, rq_std = rq_score_total.mean().item(), rq_score_total.std().item()
+    recon_err_mean, recon_err_std = recon_error_total.mean().item(), recon_error_total.std().item()
+    diff_mean, diff_std = diff_total.mean().item(), diff_total.std().item()
 
     model.eval()
     score_eval = torch.zeros(nb_nodes, device=device)
+    score_no_rq_eval = torch.zeros(nb_nodes, device=device)  # NEW
     with torch.no_grad():
         with autocast():
             for i in range(0, nb_nodes, args.batch_size):
@@ -177,12 +211,21 @@ for epoch in range(1, args.epochs):
                 batch_struct = x_struct[batch_idx]
                 batch_rq = rq[batch_idx]
                 
-                _, batch_score = model(batch_x, batch_struct, batch_edge_index, batch_neighbors, batch_rq)
+                _, batch_score, _, _, _, batch_score_no_rq, _, _, _ = model(batch_x, batch_struct, batch_edge_index, batch_neighbors, batch_rq)  # NEW: unpack minimal
                 score_eval[batch_idx] = batch_score
+                score_no_rq_eval[batch_idx] = batch_score_no_rq  # NEW
         
         auc_val = roc_auc_score(ano_label_tensor[idx_val].cpu().numpy(), score_eval[idx_val].cpu().numpy())
         auc_test = roc_auc_score(ano_label_tensor[idx_test].cpu().numpy(), score_eval[idx_test].cpu().numpy())
-        print(f"Epoch {epoch:03d} | Loss: {avg_loss:.6f} | Val AUC: {auc_val:.4f} | Test AUC: {auc_test:.4f} | Best Test AUC: {best_auc_test:.4f}")
+        
+        # NEW: AUC without rq
+        auc_val_no_rq = roc_auc_score(ano_label_tensor[idx_val].cpu().numpy(), score_no_rq_eval[idx_val].cpu().numpy())
+        auc_test_no_rq = roc_auc_score(ano_label_tensor[idx_test].cpu().numpy(), score_no_rq_eval[idx_test].cpu().numpy())
+        
+        print(f"Epoch {epoch:03d} | Loss: {avg_loss:.6f} | Recon Loss: {avg_recon_loss:.6f} | Contrast Loss: {avg_contrast_loss:.6f} | Original (Focal) Loss: {avg_original_loss:.6f}")
+        print(f"Grad Norm: {grad_norm:.4f} | Score Mean/Std: {score_mean:.4f}/{score_std:.4f} | RQ Mean/Std: {rq_mean:.4f}/{rq_std:.4f}")
+        print(f"Recon Err Mean/Std: {recon_err_mean:.4f}/{recon_err_std:.4f} | Diff Mean/Std: {diff_mean:.4f}/{diff_std:.4f}")
+        print(f"Val AUC: {auc_val:.4f} | Test AUC: {auc_test:.4f} | Val AUC no RQ: {auc_val_no_rq:.4f} | Test AUC no RQ: {auc_test_no_rq:.4f} | Best Test AUC: {best_auc_test:.4f}")
 
         scheduler.step(auc_val) # on val for less overfit to test
 
@@ -192,6 +235,21 @@ for epoch in range(1, args.epochs):
             best_epoch = epoch
             torch.save(model.state_dict(), 'best_model.pt')
             counter = 0
+            # NEW: save best stats for log
+            best_avg_recon_loss = avg_recon_loss
+            best_avg_contrast_loss = avg_contrast_loss
+            best_avg_original_loss = avg_original_loss
+            best_grad_norm = grad_norm
+            best_score_mean = score_mean
+            best_score_std = score_std
+            best_rq_mean = rq_mean
+            best_rq_std = rq_std
+            best_recon_err_mean = recon_err_mean
+            best_recon_err_std = recon_err_std
+            best_diff_mean = diff_mean
+            best_diff_std = diff_std
+            best_auc_val_no_rq = auc_val_no_rq
+            best_auc_test_no_rq = auc_test_no_rq
         else:
             counter += 1
             if counter >= args.patience:
@@ -202,6 +260,7 @@ for epoch in range(1, args.epochs):
 model.load_state_dict(torch.load('best_model.pt'))
 model.eval()
 score = torch.zeros(nb_nodes, device=device)
+score_no_rq = torch.zeros(nb_nodes, device=device)  # NEW
 with torch.no_grad():
     with autocast():
         for i in range(0, nb_nodes, args.batch_size):
@@ -223,13 +282,15 @@ with torch.no_grad():
             batch_struct = x_struct[batch_idx]
             batch_rq = rq[batch_idx]
             
-            _, batch_score = model(batch_x, batch_struct, batch_edge_index, batch_neighbors, batch_rq)
+            _, batch_score, _, _, _, batch_score_no_rq, _, _, _ = model(batch_x, batch_struct, batch_edge_index, batch_neighbors, batch_rq)  # NEW
             score[batch_idx] = batch_score
+            score_no_rq[batch_idx] = batch_score_no_rq  # NEW
 
 # Overall AUC (on all data)
 auc_overall = roc_auc_score(ano_label_tensor.cpu().numpy(), score.cpu().numpy())
+auc_overall_no_rq = roc_auc_score(ano_label_tensor.cpu().numpy(), score_no_rq.cpu().numpy())  # NEW
 print(f"\nتموم شد! بهترین Val AUC: {best_auc_val:.4f} | بهترین Test AUC: {best_auc_test:.4f} در epoch {best_epoch}")
-print(f"Overall AUC: {auc_overall:.4f}")
+print(f"Overall AUC: {auc_overall:.4f} | Overall AUC no RQ: {auc_overall_no_rq:.4f}")
 
 # Find best threshold on validation set using F1 score
 thresholds = np.linspace(0, score.max().item(), 100)
@@ -264,7 +325,11 @@ print("اگر AUC بالاتر رفت، تغییر بعدی رو بگو!")
 
 def log_results(args, best_auc_val, best_auc_test, best_epoch, auc_overall, 
                 tp, tn, fp, fn, precision_test, recall_test, f1_test,
-                tp_o, tn_o, fp_o, fn_o, precision_o, recall_o, f1_o, best_thresh):
+                tp_o, tn_o, fp_o, fn_o, precision_o, recall_o, f1_o, best_thresh,
+                best_auc_val_no_rq, best_auc_test_no_rq, auc_overall_no_rq,  # NEW
+                best_avg_recon_loss, best_avg_contrast_loss, best_avg_original_loss, best_grad_norm,  # NEW
+                best_score_mean, best_score_std, best_rq_mean, best_rq_std, 
+                best_recon_err_mean, best_recon_err_std, best_diff_mean, best_diff_std):  # NEW
     
     if not os.path.exists(args.log_dir):
         os.makedirs(args.log_dir)
@@ -292,6 +357,13 @@ def log_results(args, best_auc_val, best_auc_test, best_epoch, auc_overall,
         f.write(f"Best Val AUC: {best_auc_val:.4f}\n")
         f.write(f"Best Test AUC: {best_auc_test:.4f} at epoch {best_epoch}\n")
         f.write(f"Overall AUC: {auc_overall:.4f}\n")
+        f.write(f"AUC Val no RQ: {best_auc_val_no_rq:.4f}\n")  # NEW
+        f.write(f"AUC Test no RQ: {best_auc_test_no_rq:.4f}\n")  # NEW
+        f.write(f"AUC Overall no RQ: {auc_overall_no_rq:.4f}\n")  # NEW
+        f.write(f"Avg Recon Loss (best): {best_avg_recon_loss:.4f} | Avg Contrast Loss: {best_avg_contrast_loss:.4f} | Avg Original Loss: {best_avg_original_loss:.4f}\n")  # NEW
+        f.write(f"Grad Norm (best): {best_grad_norm:.4f}\n")  # NEW
+        f.write(f"Score Mean/Std (best): {best_score_mean:.4f}/{best_score_std:.4f} | RQ Mean/Std: {best_rq_mean:.4f}/{best_rq_std:.4f}\n")  # NEW
+        f.write(f"Recon Err Mean/Std (best): {best_recon_err_mean:.4f}/{best_recon_err_std:.4f} | Diff Mean/Std: {best_diff_mean:.4f}/{best_diff_std:.4f}\n")  # NEW
         f.write("\nTest Metrics (Threshold: {best_thresh:.4f}):\n")
         f.write(f"TP: {tp} | TN: {tn} | FP: {fp} | FN: {fn}\n")
         f.write(f"Precision: {precision_test:.4f} | Recall: {recall_test:.4f} | F1: {f1_test:.4f}\n")
@@ -303,4 +375,8 @@ def log_results(args, best_auc_val, best_auc_test, best_epoch, auc_overall,
 
 log_results(args, best_auc_val, best_auc_test, best_epoch, auc_overall, 
             tp, tn, fp, fn, precision_test, recall_test, f1_test,
-            tp_o, tn_o, fp_o, fn_o, precision_o, recall_o, f1_o, best_thresh)
+            tp_o, tn_o, fp_o, fn_o, precision_o, recall_o, f1_o, best_thresh,
+            best_auc_val_no_rq, best_auc_test_no_rq, auc_overall_no_rq,
+            best_avg_recon_loss, best_avg_contrast_loss, best_avg_original_loss, best_grad_norm,
+            best_score_mean, best_score_std, best_rq_mean, best_rq_std,
+            best_recon_err_mean, best_recon_err_std, best_diff_mean, best_diff_std)

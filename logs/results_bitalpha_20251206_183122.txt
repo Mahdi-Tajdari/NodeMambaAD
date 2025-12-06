@@ -1,0 +1,28 @@
+Dataset: bitalpha
+Seed: 42
+Batch Size: 4096
+Learning Rate: 0.005
+Weight Decay: 0.005
+Max Epochs: 50
+Patience: 150
+Hidden Dim: 64
+K Neighbors: 32
+Mamba d_state: 32
+Lambda Recon: 0.3
+Contrast Lambda: 0.5
+Dropout: 0.6
+Gamma Focal: 2.0
+Device: cuda
+
+Training Results:
+Best Val AUC: 0.8664
+Best Test AUC: 0.6935 at epoch 38
+Overall AUC: 0.7380
+
+Test Metrics (Threshold: {best_thresh:.4f}):
+TP: 13 | TN: 283 | FP: 9 | FN: 17
+Precision: 0.5909 | Recall: 0.4333 | F1: 0.5000
+
+Overall Metrics (Threshold: {best_thresh:.4f}):
+TP: 150 | TN: 2764 | FP: 155 | FN: 150
+Precision: 0.4918 | Recall: 0.5000 | F1: 0.4959

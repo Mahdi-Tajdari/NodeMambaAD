@@ -177,12 +177,14 @@ class NodeGLADMambaRecon(nn.Module):
         recon_error = (recon_seq_feat - seq_feat).pow(2).mean(dim=(1,2)) + (recon_seq_struct - seq_struct).pow(2).mean(dim=(1,2))
         recon_error = (recon_error - recon_error.mean()) / (recon_error.std() + 1e-8)  # normalize
         score = torch.clamp(diff + self.lambda_recon_score * recon_error, min=0.0, max=5.0) + torch.sigmoid(self.rq_weight) * rq_score
+        score_no_rq = torch.clamp(diff + self.lambda_recon_score * recon_error, min=0.0, max=5.0)  # NEW: without rq
+        
         gamma = self.args.gamma_focal
         original_loss = - ( (1 - torch.sigmoid(score)) ** gamma * F.logsigmoid(score) ).mean()
         
         loss = self.lambda_recon * recon_loss + self.contrast_lambda * contrast_loss + (1 - self.contrast_lambda - self.lambda_recon) * original_loss
         
         if self.training:
-            return loss, score
+            return loss, score, recon_loss, contrast_loss, original_loss, score_no_rq, diff, rq_score, recon_error  # NEW
         else:
-            return None, score
+            return None, score, recon_loss, contrast_loss, original_loss, score_no_rq, diff, rq_score, recon_error  # NEW
