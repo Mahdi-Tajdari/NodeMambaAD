@@ -1,4 +1,5 @@
 # models.py
+# بدون تغییر — forward از args.k استفاده نمی‌کنه، مستقیم از neighbors
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6,9 +7,9 @@ from mamba_ssm import Mamba
 from torch_geometric.nn import GCNConv
 
 class NodeGLADMamba(nn.Module):
-    def __init__(self, feat_dim, hidden_dim=128, k=8):
+    def __init__(self, feat_dim, hidden_dim=128, k=32):
         super().__init__()
-        self.k = k
+        self.k = k  # فقط برای info، forward از neighbors.shape استفاده می‌کنه
         self.hidden_dim = hidden_dim
         
         # دو تا GNN واقعی
@@ -23,7 +24,7 @@ class NodeGLADMamba(nn.Module):
         self.rq_weight = nn.Parameter(torch.tensor(1.0))
 
     def forward(self, x, x_struct, edge_index, neighbors, rq):
-        # x: [N,F], x_struct: [N,12], edge_index: [2,E], neighbors: [N,8], rq: [N,1]
+        # x: [N,F], x_struct: [N,12], edge_index: [2,E], neighbors: [N,k], rq: [N,1]
         
         h = x
         for conv in self.gnn_feat:
@@ -37,12 +38,15 @@ class NodeGLADMamba(nn.Module):
         
         h_struct = h
         
-        # ساخت توالی
-        seq1 = torch.cat([h_feat.unsqueeze(1), h_struct[neighbors]], dim=1)   # [N,9,hidden_dim]
+        # ساخت توالی — طول = 1 + neighbors.shape[1]
+        seq1 = torch.cat([h_feat.unsqueeze(1), h_struct[neighbors]], dim=1)   # [N, 1+k, hidden_dim]
         seq2 = torch.cat([h_struct.unsqueeze(1), h_feat[neighbors]], dim=1)
         
-        # Mamba bidirectional - simple selective by flip
-        out1 = self.mamba1(seq1)[:, 0, :]      
-        out2 = self.mamba2(seq2.flip(1))[:, 0, :]
+        # Mamba — pooling برای کل توالی
+        m1_out = self.mamba1(seq1)  # [N, 1+k, hidden]
+        out1 = m1_out.mean(dim=1)  # mean pooling
+        
+        m2_out = self.mamba2(seq2.flip(1))  # [N, 1+k, hidden]
+        out2 = m2_out.mean(dim=1)  # mean pooling
 
         return out1, out2  # برای contrastive loss

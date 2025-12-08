@@ -94,37 +94,49 @@ def adj_to_dgl_graph(adj):
     nx_graph = nx.from_scipy_sparse_array(adj)
     dgl_graph = dgl.DGLGraph(nx_graph)
     return dgl_graph
-# فقط این ۳ تا تابع رو به انتهای utils.py اضافه کن
 
-# فقط این ۳ تا تابع رو در utils.py کپی کن (جایگزین قبلی‌ها کن)
+import torch
+import random  # اگر قبلاً import نشده
 
-# utils.py — این تابع رو دقیقاً جایگزین کن (فقط همین یکی!)
-def get_topk_neighbors_dgl(g, k=8):
-    """سازگار با DGL قدیمی + بدون .device + بدون .number_of_nodes() مشکل"""
-    num_nodes = g.number_of_nodes()  # درست برای DGL قدیمی
+def get_topk_neighbors_dgl(g, k=32, walk_length=5, restart_prob=0.2):
+    """نسخه جدید: random walk برای sample subgraph (نه فقط 1-hop)"""
+    num_nodes = g.number_of_nodes()
     adj = g.adjacency_matrix(transpose=False).coalesce()
-    src, dst = adj.indices()[0], adj.indices()[1]  # src: منبع، dst: مقصد
-
+    src, dst = adj.indices()[0], adj.indices()[1]
+    
+    # ساخت لیست همسایه‌ها برای دسترسی سریع
+    adj_list = [[] for _ in range(num_nodes)]
+    for i in range(len(src)):
+        adj_list[src[i]].append(dst[i])
+    
     neighbors = []
-    for i in range(num_nodes):
-        neigh = dst[src == i]  # همسایه‌های نود i
+    for start in range(num_nodes):
+        sampled = set([start])  # شروع با خود نود
+        current = start
+        for _ in range(k * walk_length):  # over-sample برای اطمینان
+            if random.random() < restart_prob:  # restart with prob
+                current = start
+            if not adj_list[current]:  # اگر degree=0
+                current = start
+                continue
+            current = random.choice(adj_list[current])  # walk step
+            sampled.add(current)
+            if len(sampled) >= k + 1:  # +1 برای خود نود
+                break
         
-        if len(neigh) == 0:
-            neigh = torch.tensor([i], dtype=torch.long)
-        elif len(neigh) > k:
-            # بدون استفاده از g.device — خود تنسور می‌دونه کجاست
-            perm = torch.randperm(len(neigh))[:k]
-            neigh = neigh[perm]
+        # تبدیل به لیست و حذف خود نود اگر لازم (اما نگه دار چون pad خوب نیست)
+        sampled_list = list(sampled)
+        if len(sampled_list) > k:
+            sampled_list = random.sample(sampled_list, k)  # subsample
         else:
-            # پد با خود نود
-            pad = torch.full((k - len(neigh),), i, dtype=torch.long, device=neigh.device if len(neigh) > 0 else torch.device('cpu'))
-            neigh = torch.cat([neigh, pad], dim=0)
+            # pad با random از sampled یا خود start
+            pad = [start] * (k - len(sampled_list))
+            sampled_list.extend(pad)
         
-        neighbors.append(neigh)
+        neighbors.append(torch.tensor(sampled_list, dtype=torch.long))
     
     return torch.stack(neighbors)  # [N, k]
 
-# utils.py — نسخه ۱۰۰٪ درست و بدون خطا (کپی کن جایگزین کن)
 def structural_encoding_from_adj(edge_index, num_nodes):
     device = edge_index.device
     row, col = edge_index
@@ -186,7 +198,7 @@ def structural_encoding_from_adj(edge_index, num_nodes):
     # نرمال‌سازی
     enc = (enc - enc.mean(0, keepdim=True)) / (enc.std(0, keepdim=True) + 1e-8)
     return enc  # [N, 12]
-# utils.py — نسخه نهایی compute_rq_from_adj (بدون هیچ خطا)
+
 def compute_rq_from_adj(x, edge_index):
     row, col = edge_index
     num_nodes = x.shape[0]
