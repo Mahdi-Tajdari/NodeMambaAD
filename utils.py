@@ -1,4 +1,3 @@
-# utils.py
 import numpy as np
 import networkx as nx
 import scipy.sparse as sp
@@ -6,9 +5,7 @@ import torch
 import scipy.io as sio
 import random
 import dgl
-from sklearn.model_selection import train_test_split  # اضافه شده برای random split
 
-# توابع دقیقا مشابه کد مرجع
 def sparse_to_tuple(sparse_mx, insert_batch=False):
     """Convert sparse matrix to tuple representation."""
     def to_tuple(mx):
@@ -29,6 +26,7 @@ def sparse_to_tuple(sparse_mx, insert_batch=False):
             sparse_mx[i] = to_tuple(sparse_mx[i])
     else:
         sparse_mx = to_tuple(sparse_mx)
+
     return sparse_mx
 
 def preprocess_features(features):
@@ -49,209 +47,24 @@ def normalize_adj(adj):
     d_mat_inv_sqrt = sp.diags(d_inv_sqrt)
     return adj.dot(d_mat_inv_sqrt).transpose().dot(d_mat_inv_sqrt).tocoo()
 
-def dense_to_one_hot(labels_dense, num_classes):
-    """Convert class labels from scalars to one-hot vectors."""
-    num_labels = labels_dense.shape[0]
-    index_offset = np.arange(num_labels) * num_classes
-    labels_one_hot = np.zeros((num_labels, num_classes))
-    labels_one_hot.flat[index_offset+labels_dense.ravel()] = 1
-    return labels_one_hot
-
-def load_mat(dataset_name):
-    """Load .mat dataset with random stratified split (80/10/10)."""
-    data = sio.loadmat("./data/{}.mat".format(dataset_name))
-    
+def load_mat(dataset):
+    """Load .mat dataset."""
+    # Assuming the data is in ./Data/
+    data = sio.loadmat(f"./data/{dataset}.mat")
     label = data['Label'] if ('Label' in data) else data['gnd']
     attr = data['Attributes'] if ('Attributes' in data) else data['X']
     network = data['Network'] if ('Network' in data) else data['A']
     
     adj = sp.csr_matrix(network)
     feat = sp.lil_matrix(attr)
-    
-    labels = np.squeeze(np.array(data['Class'],dtype=np.int64) - 1)
-    num_classes = np.max(labels) + 1
-    labels = dense_to_one_hot(labels,num_classes)
-    
+
     ano_labels = np.squeeze(np.array(label))
-    
-    # Random stratified split: 80% train, 10% val, 10% test
-    num_node = adj.shape[0]
-    indices = np.arange(num_node)
-    stratify = ano_labels if ano_labels is not None else None  # Stratify بر اساس ano_labels برای حفظ توزیع anomalies
-    
-    # Split to train (80%) and temp (20%)
-    idx_train, temp_idx = train_test_split(indices, test_size=0.2, random_state=42, stratify=stratify)
-    
-    # Split temp to val (10%) and test (10%)
-    stratify_temp = ano_labels[temp_idx] if ano_labels is not None else None
-    idx_val, idx_test = train_test_split(temp_idx, test_size=0.5, random_state=42, stratify=stratify_temp)
-    
-    if 'str_anomaly_label' in data:
-        str_ano_labels = np.squeeze(np.array(data['str_anomaly_label']))
-        attr_ano_labels = np.squeeze(np.array(data['attr_anomaly_label']))
-    else:
-        str_ano_labels = None
-        attr_ano_labels = None
-    
-    return adj, feat, labels, idx_train, idx_val, idx_test, ano_labels, str_ano_labels, attr_ano_labels
+
+    return adj, feat, ano_labels
 
 def adj_to_dgl_graph(adj):
-    """Convert adjacency matrix to dgl format. (FIXED FOR NETWORKX VERSION ERROR)"""
-    # FIX: Changed from 'from_scipy_sparse_matrix' to 'from_scipy_sparse_array'
+    """Convert adjacency matrix to dgl format."""
+    # FIX: Using from_scipy_sparse_array instead of the deprecated from_scipy_sparse_matrix
     nx_graph = nx.from_scipy_sparse_array(adj)
     dgl_graph = dgl.DGLGraph(nx_graph)
     return dgl_graph
-
-# فقط این ۳ تا تابع رو به انتهای utils.py اضافه کن
-
-# فقط این ۳ تا تابع رو در utils.py کپی کن (جایگزین قبلی‌ها کن)
-
-# utils.py — این تابع رو دقیقاً جایگزین کن (فقط همین یکی!)
-def get_topk_neighbors_dgl(g, k=8):
-    """سازگار با DGL قدیمی + بدون .device + بدون .number_of_nodes() مشکل"""
-    num_nodes = g.number_of_nodes()  # درست برای DGL قدیمی
-    adj = g.adjacency_matrix(transpose=False).coalesce()
-    src, dst = adj.indices()[0], adj.indices()[1]  # src: منبع، dst: مقصد
-
-    neighbors = []
-    for i in range(num_nodes):
-        neigh = dst[src == i]  # همسایه‌های نود i
-        
-        if len(neigh) == 0:
-            neigh = torch.tensor([i], dtype=torch.long)
-        elif len(neigh) > k:
-            # بدون استفاده از g.device — خود تنسور می‌دونه کجاست
-            perm = torch.randperm(len(neigh))[:k]
-            neigh = neigh[perm]
-        else:
-            # پد با خود نود
-            pad = torch.full((k - len(neigh),), i, dtype=torch.long, device=neigh.device if len(neigh) > 0 else torch.device('cpu'))
-            neigh = torch.cat([neigh, pad], dim=0)
-        
-        neighbors.append(neigh)
-    
-    return torch.stack(neighbors)  # [N, k]
-
-# utils.py — نسخه ۱۰۰٪ درست و بدون خطا (کپی کن جایگزین کن)
-# utils.py (بقیه توابع نگه دار)
-
-# utils.py (بقیه بدون تغییر)
-
-def structural_encoding_from_adj(edge_index, num_nodes):
-    device = edge_index.device
-    row, col = edge_index
-    
-    # adj dense
-    adj = torch.zeros((num_nodes, num_nodes), device=device, dtype=torch.float)
-    ones = torch.ones(row.size(0), device=device)
-    adj.index_put_((row, col), ones, accumulate=True)
-    adj.index_put_((col, row), ones, accumulate=True)
-    
-    deg = adj.sum(1)
-    deg_log = torch.log1p(deg)
-
-    # Clustering coeff
-    adj2 = adj @ adj
-    deg_pair = deg * (deg - 1)
-    deg_pair[deg_pair == 0] = 1
-    clust = adj2.diag() / deg_pair
-    clust = clust.clamp(0, 1)
-
-    # 5-step RW
-    rw = torch.eye(num_nodes, device=device)
-    rws = []
-    for _ in range(5):
-        rw = rw @ adj
-        rws.append(rw.diag())
-    rw_feat = torch.stack(rws, dim=1)  # [N,5]
-
-    # 5 landmark dist
-    landmarks = random.sample(range(num_nodes), min(5, num_nodes))
-    dist_enc = torch.zeros(num_nodes, len(landmarks), device=device)
-    for i, lm in enumerate(landmarks):
-        dist = torch.full((num_nodes,), 999, dtype=torch.long, device=device)
-        dist[lm] = 0
-        visited = torch.zeros(num_nodes, dtype=torch.bool, device=device)
-        visited[lm] = True
-        q = [lm]
-        ptr = 0
-        while ptr < len(q):
-            u = q[ptr]
-            ptr += 1
-            neighbors = col[row == u]
-            for v in neighbors.tolist():
-                if not visited[v]:
-                    visited[v] = True
-                    dist[v] = dist[u] + 1
-                    q.append(v)
-        dist_enc[:, i] = dist.float()
-
-    # Eigenvector centrality approx
-    ev = torch.ones(num_nodes, device=device) / num_nodes
-    for _ in range(10):
-        ev = adj @ ev
-        ev /= ev.norm()
-    ev = ev.unsqueeze(1)
-
-    # PageRank approx
-    pr = torch.ones(num_nodes, device=device) / num_nodes
-    alpha = 0.85
-    for _ in range(10):
-        pr = alpha * (adj @ pr) + (1 - alpha) / num_nodes
-    pr = pr.unsqueeze(1)
-
-    # Betweenness approx بهتر: استفاده از degree-based proxy ساده (high degree = high betweenness)
-    bet = deg.unsqueeze(1) / deg.mean()  # proxy ساده بدون random برای stability
-
-    # Eccentricity approx
-    ecc = dist_enc.max(1)[0].unsqueeze(1)
-
-    # ترکیب به 20 فیچر
-    enc = torch.cat([
-        deg_log.unsqueeze(1),
-        clust.unsqueeze(1),
-        rw_feat,
-        dist_enc,
-        ev,
-        pr,
-        bet,
-        ecc,
-        torch.zeros(num_nodes, 4, device=device)  # padding
-    ], dim=1)[:, :20]
-
-    # normalize
-    enc = (enc - enc.mean(0, keepdim=True)) / (enc.std(0, keepdim=True) + 1e-8)
-    return enc
-# utils.py — نسخه نهایی compute_rq_from_adj (بدون هیچ خطا)
-def compute_rq_from_adj(x, edge_index):
-    row, col = edge_index
-    num_nodes = x.shape[0]
-    device = x.device
-    
-    # محاسبه degree
-    deg = torch.zeros(num_nodes, device=device)
-    deg.scatter_add_(0, row, torch.ones_like(row, dtype=torch.float))
-    deg_inv_sqrt = deg.pow(-0.5)
-    deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
-    
-    # ساخت normalized adjacency به صورت dense (برای سرعت و سادگی)
-    # چون Cora فقط 2708 نود داره → حافظه مشکلی نیست
-    adj_norm = torch.zeros((num_nodes, num_nodes), device=device)
-    norm_val = deg_inv_sqrt[row] * deg_inv_sqrt[col]
-    adj_norm.index_put_((row, col), norm_val, accumulate=True)
-    adj_norm.index_put_((col, row), norm_val, accumulate=True)  # undirected
-    
-    # L_sym = I - Ã
-    L_norm = torch.eye(num_nodes, device=device) - adj_norm
-    
-    # x^T L x
-    xLx = torch.sum(x * (L_norm @ x), dim=1, keepdim=True)
-    
-    # (اختیاری) نرمال‌سازی با x^T x
-    x_norm = torch.sum(x ** 2, dim=1, keepdim=True) + 1e-8
-    rq = xLx / x_norm
-    
-    # ReLU برای اینکه فقط فرکانس بالا بگیریم
-    rq = torch.relu(rq)
-    
-    return rq  # [N, 1]
