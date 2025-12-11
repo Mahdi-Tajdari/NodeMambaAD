@@ -1,88 +1,167 @@
-# models.py - نسخه با GCN + focal original_loss for focus on hard anomalies
+from typing import Any, Dict, Optional
 import torch
-import torch.nn as nn
+from torch.nn import (
+    Linear,
+    ReLU,
+    Sequential,
+    Dropout
+)
 import torch.nn.functional as F
+from torch_geometric.nn import GATConv
+from torch_geometric.nn.conv import MessagePassing
+from torch_geometric.nn.inits import reset
+from torch_geometric.nn.resolver import (
+    activation_resolver,
+    normalization_resolver,
+)
+from torch_geometric.typing import Adj
+from torch_geometric.utils import to_dense_batch
 from mamba_ssm import Mamba
-from torch_geometric.nn import GCNConv
 
-class NodeGLADMamba(nn.Module):
-    def __init__(self, feat_dim, hidden_dim=128, k=32):
+class GATMambaBlock(torch.nn.Module):
+    def __init__(
+        self,
+        channels: int,
+        conv: Optional[MessagePassing],
+        heads: int = 1,
+        dropout: float = 0.0,
+        attn_dropout: float = 0.0,
+        act: str = 'relu',
+        att_type: str = 'mamba',
+        d_state: int = 16,
+        d_conv: int = 4,
+        act_kwargs: Optional[Dict[str, Any]] = None,
+        norm: Optional[str] = 'batch_norm',
+        norm_kwargs: Optional[Dict[str, Any]] = None,
+    ):
         super().__init__()
-        self.k = k
-        self.hidden_dim = hidden_dim
-        
-        # سه لایه GCN
-        self.gnn_feat = nn.ModuleList([
-            GCNConv(feat_dim, hidden_dim),
-            GCNConv(hidden_dim, hidden_dim),
-            GCNConv(hidden_dim, hidden_dim)
-        ])
-        self.gnn_struct = nn.ModuleList([
-            GCNConv(20, hidden_dim),
-            GCNConv(hidden_dim, hidden_dim),
-            GCNConv(hidden_dim, hidden_dim)
-        ])
-        
-        # Mamba با d_state=32
-        self.mamba1 = Mamba(d_model=hidden_dim, d_state=32, d_conv=4, expand=4)
-        self.mamba2 = Mamba(d_model=hidden_dim, d_state=32, d_conv=4, expand=4)
-        
-        self.norm = nn.LayerNorm(hidden_dim)
-        self.dropout = nn.Dropout(0.4)
-        self.rq_weight = nn.Parameter(torch.tensor(0.5))
-        self.contrast_lambda = 0.5
 
-    def forward(self, x, x_struct, edge_index, neighbors, rq):
-        h = x
-        for conv in self.gnn_feat:
-            h = F.silu(conv(h, edge_index))
-            h = self.dropout(h)
-        h_feat = self.norm(h)
+        self.channels = channels
+        self.conv = conv
+        self.heads = heads
+        self.dropout = dropout
+        self.att_type = att_type
+                
+        if self.att_type == 'mamba':
+            self.self_attn = Mamba(
+                d_model=channels,
+                d_state=d_state,
+                d_conv=d_conv,
+                expand=1
+            )
+            
+        self.mlp = Sequential(
+            Linear(channels, channels * 2),
+            activation_resolver(act, **(act_kwargs or {})),
+            Dropout(dropout),
+            Linear(channels * 2, channels),
+            Dropout(dropout),
+        )
+
+        norm_kwargs = norm_kwargs or {}
+        self.norm1 = normalization_resolver(norm, channels, **norm_kwargs)
+        self.norm2 = normalization_resolver(norm, channels, **norm_kwargs)
+        self.norm3 = normalization_resolver(norm, channels, **norm_kwargs)
+    
+    def forward(
+        self,
+        x: torch.Tensor,
+        edge_index: Adj,
+        batch: Optional[torch.Tensor] = None,
+        edge_attr: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> torch.Tensor:
         
-        h = x_struct
-        for conv in self.gnn_struct:
-            h = F.silu(conv(h, edge_index))
-            h = self.dropout(h)
-        h_struct = self.norm(h)
+        hs = []
+        if self.conv is not None:  
+            h_local = self.conv(x, edge_index, edge_attr=edge_attr, **kwargs) 
+            h_local = F.dropout(h_local, p=self.dropout, training=self.training) 
+            h_local = self.norm1(h_local) if self.norm1 is not None else h_local
+            hs.append(h_local)
         
-        # Anonymize target
-        seq1 = torch.cat([torch.zeros_like(h_feat.unsqueeze(1)), h_struct[neighbors]], dim=1)
-        seq2 = torch.cat([torch.zeros_like(h_struct.unsqueeze(1)), h_feat[neighbors]], dim=1)
+        if self.att_type == 'mamba':
+            h_global, mask = to_dense_batch(x, batch)
+            h_global = self.self_attn(h_global)[mask]
+            h_global = F.dropout(h_global, p=self.dropout, training=self.training)
+            h_global = self.norm2(h_global) if self.norm2 is not None else h_global
+            hs.append(h_global)
         
-        out1 = self.mamba1(seq1)[:, 0, :]
-        out2 = self.mamba2(seq2.flip(1))[:, 0, :]
+        out = sum(hs) + x
+        out = out + self.mlp(out)
+        out = self.norm3(out) if self.norm3 is not None else out
         
-        # Negative samples (lighter: only one)
-        neg_indices = torch.randperm(neighbors.size(0), device=neighbors.device)
-        neg_neighbors = neighbors[neg_indices]
-        seq1_neg = torch.cat([torch.zeros_like(h_feat.unsqueeze(1)), h_struct[neg_neighbors]], dim=1)
-        out1_neg = self.mamba1(seq1_neg)[:, 0, :]
+        return out
+
+class GATMambaAutoencoder(torch.nn.Module):
+    def __init__(self, in_features, hidden_dim=64, num_layers=2, gnn_dropout=0.1, mlp_dropout=0.3, num_heads=1):
+        super(GATMambaAutoencoder, self).__init__()
         
-        # Positive cos
-        cos_pos = F.cosine_similarity(out1, out2, dim=1)
-        # Negative
-        cos_neg = F.cosine_similarity(out1, out1_neg, dim=1)
+        self.in_features = in_features
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.num_heads = num_heads
+
+        self.input_transform = Linear(in_features, hidden_dim * num_heads)
+
+        self.encoder_layers = torch.nn.ModuleList()
+        for i in range(num_layers):
+            conv_gat = GATConv(hidden_dim * num_heads, hidden_dim, heads = num_heads, dropout = gnn_dropout)
+            layer = GATMambaBlock(
+                channels=hidden_dim * num_heads,
+                conv=conv_gat,
+                heads=num_heads,
+                attn_dropout=mlp_dropout,
+                dropout=mlp_dropout,
+                att_type='mamba'
+            )
+            self.encoder_layers.append(layer)
         
-        # Contrastive loss
-        logits_pos = cos_pos.unsqueeze(1)
-        logits_neg = cos_neg.unsqueeze(1)
-        labels = torch.zeros(out1.size(0), dtype=torch.long, device=out1.device)
-        contrast_loss = F.cross_entropy(torch.cat([logits_pos, logits_neg], dim=1), labels)
+        self.decoder = Sequential(
+            Linear(hidden_dim * num_heads, hidden_dim),
+            ReLU(),
+            Linear(hidden_dim, in_features)
+        )
+
+    def forward(self, features, edge_index, edge_attr=None):
         
-        # Score
-        diff = F.mse_loss(out1, out2, reduction='none').mean(dim=1)
-        rq_score = rq.squeeze()
-        rq_score = torch.sigmoid(rq_score / (rq_score.mean() + 1e-8))
-        rq_score = torch.clamp(rq_score, min=0.0, max=2.0)
-        score = torch.clamp(diff, min=0.0, max=5.0) + torch.sigmoid(self.rq_weight) * rq_score
+        x = self.input_transform(features)
+
+        for layer in self.encoder_layers:
+            x = layer(x, edge_index, edge_attr=edge_attr)
         
-        # Focal-like original_loss for focus on high score (anomalies)
-        gamma = 2.0
-        original_loss = - ( (1 - torch.sigmoid(score)) ** gamma * F.logsigmoid(score) ).mean()
+        H = x 
+
+        x_reconstruction = self.decoder(H)
         
-        loss = self.contrast_lambda * contrast_loss + (1 - self.contrast_lambda) * original_loss
+        return x_reconstruction, H
+
+class Model(torch.nn.Module):
+    def __init__(self, ft_size, hidden_dim=64, num_layers=2, num_heads=1):
+        super().__init__()
+        self.autoencoder = GATMambaAutoencoder(
+            in_features=ft_size,
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            num_heads=num_heads
+        )
+    
+    def forward(self, features, adj_tensor, edge_index=None, edge_attr=None):
         
-        if self.training:
-            return loss, score
-        else:
-            return None, score
+        # اطمینان از اینکه همه تنسورها روی دستگاه صحیح هستند
+        current_device = features.device
+        
+        x = features.squeeze(0)
+        
+        if edge_index is None:
+            # انتقال adj به دستگاه ویژگی ها قبل از تبدیل
+            adj = adj_tensor.squeeze(0).to(current_device)
+            
+            # استخراج edge_index
+            edge_index = adj.nonzero(as_tuple=False).t().contiguous()
+        
+        # اطمینان از اینکه edge_index روی دستگاه صحیح است (اگر از قبل نبود)
+        edge_index = edge_index.to(current_device)
+        
+        reconstruction, embedding = self.autoencoder(x, edge_index, edge_attr)
+        
+        return reconstruction, embedding
